@@ -80,6 +80,25 @@ jobs:
             | tar -xz -C /tmp gitleaks
           /tmp/gitleaks detect --source . --redact --verbose --no-banner
 
+  unit:
+    name: Risk core tests
+    runs-on: ubuntu-latest
+    # No Solana toolchain here, deliberately. The risk crate has no Solana
+    # dependencies precisely so its maths can be tested in seconds rather than
+    # behind a ten-minute Anchor build. If this job ever needs Agave installed,
+    # something has leaked into the crate that should not be there.
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1 # master @ 2024-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: Test
+        run: cargo test -p sakura-perps-risk --locked
+
   build:
     name: Build program
     runs-on: ubuntu-latest
@@ -174,7 +193,7 @@ jobs:
         # Two sibling programs used anchor_spl::token against a Token-2022 mint
         # and were dead on arrival. Only token_interface accepts both programs.
         run: |
-          if grep -rn "anchor_spl::token::" programs/ ; then
+          if grep -rn "anchor_spl::token::" programs/ crates/ ; then
             echo "::error::Use anchor_spl::token_interface, not anchor_spl::token."
             exit 1
           fi
@@ -182,7 +201,7 @@ jobs:
 
       - name: No unchecked oracle reads
         run: |
-          if grep -rn "get_price_unchecked" programs/ ; then
+          if grep -rn "get_price_unchecked" programs/ crates/ ; then
             echo "::error::get_price_unchecked skips verification and staleness."
             exit 1
           fi
@@ -196,9 +215,24 @@ jobs:
         # documentation explaining why we avoid it does not trip its own check.
         # The first version of this guardrail failed CI on the doc comment in
         # lib.rs that tells you not to use saturating arithmetic.
+        #
+        # Scoped to src/ so test code may still use it for constructing inputs,
+        # where clamping a generated value is harmless and failing is not.
         run: |
-          if grep -rn --include='*.rs' '\.saturating_' programs/ ; then
+          if grep -rn --include='*.rs' '\.saturating_' programs/*/src crates/*/src ; then
             echo "::error::Use checked_* with a named error, not saturating_*."
+            exit 1
+          fi
+          echo "ok"
+
+      - name: No floating point in risk maths
+        # The risk crate claims zero floats and the claim should be mechanical.
+        # Floating point is non-associative, its rounding is not controllable,
+        # and its presence in margin maths is an audit finding on its own.
+        run: |
+          if grep -rnE --include='*.rs' '\b(f32|f64)\b|as f32|as f64' \
+               programs/*/src crates/*/src ; then
+            echo "::error::Floating point is not permitted. Use fixed-point integers."
             exit 1
           fi
           echo "ok"

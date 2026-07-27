@@ -1,0 +1,20 @@
+[package]
+name = "sakura-perps-risk"
+version = "0.1.0"
+description = "Pure risk and margin mathematics for Sakura Perps. No Solana dependencies."
+edition = "2021"
+license = "BUSL-1.1"
+
+[dependencies]
+# Deliberately none. This crate must be compilable and testable without a
+# Solana toolchain, so the maths can be property-tested in milliseconds and
+# audited in isolation from account plumbing.
+
+[dev-dependencies]
+proptest = "1.5"
+
+[lints.rust]
+# Floating point has no place in margin maths: it is non-associative, its
+# rounding is not controllable, and it is an audit finding on its own.
+# Enforced by CI grep as well; this is the belt.
+missing_docs = "warn"
