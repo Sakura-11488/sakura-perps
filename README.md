@@ -138,11 +138,38 @@ Source-to-bytecode traceability. Every deploy gets a row.
 
 | Cluster | Program id | `.so` sha256 | Tag | Date | Upgrade authority |
 |---|---|---|---|---|---|
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | _pending first deploy_ | — | — | deployer key |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `cb1fee92…f717289c` | `devnet-v0.1.0` | 2026-07-27 | `5JSAncTb…dKP` |
+
+The deployed binary is the artifact CI produced, not a local build. `solana
+program dump` returns bytes whose sha256 matches the CI artifact exactly, so the
+source in this repository provably corresponds to the bytecode on chain.
+
+ProgramData lives at `Cy3X6ZFgt1ELXh4Qnp9NcNrUKRT7U4vQrWq5SFVAdREw`.
 
 Upgrade authority is a single key while on devnet. Before any mainnet
 consideration it moves to a Squads multisig behind a timelock, and there will
 never be an instruction permitting the admin to move funds out of the vault.
+
+### Deploying
+
+The public `api.devnet.solana.com` endpoint is unreliable for program deploys —
+three attempts failed there with "30 write transactions failed", a TPU client
+that could not reach the websocket, and then HTTP 429. Use a dedicated RPC:
+
+```bash
+solana program deploy target/deploy/sakura_perps.so \
+  --program-id target/deploy/sakura_perps-keypair.json \
+  --url "https://devnet.helius-rpc.com/?api-key=YOUR_KEY" \
+  --with-compute-unit-price 50000 --max-sign-attempts 100
+```
+
+Every failed deploy strands a buffer account holding roughly 1 SOL. Reclaim them
+or you will wonder where your devnet balance went:
+
+```bash
+solana program show --buffers --url "$RPC"
+solana program close --buffers --url "$RPC"
+```
 
 ## Testing
 
