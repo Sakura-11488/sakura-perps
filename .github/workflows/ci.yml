@@ -29,14 +29,17 @@ env:
   # equal anchor-lang, or discriminators and the generated IDL diverge from what
   # the deployed program expects.
   RUST_TOOLCHAIN: "1.88.0"
-  SOLANA_VERSION: "3.0.14"
-  ANCHOR_VERSION: "0.32.1"
-  # Agave 3.0.14 bundles platform-tools v1.51, whose SBF Rust is 1.84.1 — older
+  # Agave 3.0.14 bundled platform-tools v1.51, whose SBF Rust is 1.84.1 — older
   # than the 1.85 that stabilised edition 2024. Several crates in anchor-spl's
-  # transitive tree now require it, so a v1.51 build dies with "feature
-  # `edition2024` is required" before compiling a line of our code. v1.54 ships
-  # Rust 1.89, which parses them. Pinned explicitly so local and CI agree.
-  PLATFORM_TOOLS_VERSION: "v1.54"
+  # transitive tree now require edition 2024, so a v1.51 build dies with
+  # "feature `edition2024` is required" before reaching our code.
+  #
+  # Installing v1.54 alongside it did not help: `anchor build` does not reach for
+  # it, and passing --tools-version through `anchor build --` is rejected by the
+  # IDL builder. Agave 4.1.2 bundles a current platform-tools by default, which
+  # fixes it at the source rather than working around it.
+  SOLANA_VERSION: "4.1.2"
+  ANCHOR_VERSION: "0.32.1"
 
 jobs:
   lint:
@@ -107,13 +110,6 @@ jobs:
         run: |
           cargo install --git https://github.com/coral-xyz/anchor \
             --tag "v${ANCHOR_VERSION}" anchor-cli --locked
-
-      - name: Install platform-tools ${{ env.PLATFORM_TOOLS_VERSION }}
-        # Must run before `anchor build`, which otherwise uses the v1.51 that
-        # Agave bundles. On Linux this just works; on Windows the same command
-        # fails with "Access is denied" because linking the rustup toolchain
-        # needs a directory junction, which requires elevation or Developer Mode.
-        run: cargo-build-sbf --tools-version "${PLATFORM_TOOLS_VERSION}" --install-only
 
       - name: Versions
         run: |
