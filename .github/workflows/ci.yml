@@ -181,6 +181,49 @@ jobs:
             target/types/sakura_perps.ts
           if-no-files-found: error
 
+  svm:
+    name: SVM integration tests
+    runs-on: ubuntu-latest
+    # Needs the compiled program, so it waits for the build rather than
+    # rebuilding it. Downloading the same artifact that gets deployed also means
+    # these tests exercise the exact binary that ships, not a separate build of
+    # the same source.
+    needs: build
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1 # master @ 2024-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: Install build dependencies
+        # LiteSVM pulls the Agave runtime, which reaches solana-secp256r1-program
+        # and therefore OpenSSL. Present on the runner, but named explicitly so a
+        # future image change fails here with an obvious cause rather than an
+        # openssl-sys build script error nobody can place.
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: program
+          path: target
+
+      - name: Assert the program binary is present
+        # The tests skip when the binary is missing, so a developer without a
+        # Solana toolchain still gets a green `cargo test`. That behaviour must
+        # not extend to CI: a skipped safety test reporting success is worse than
+        # no test at all. This is the check that makes the skip safe.
+        run: |
+          test -f target/deploy/sakura_perps.so
+          ls -la target/deploy/sakura_perps.so
+
+      - name: Test
+        env:
+          SAKURA_PERPS_SO: target/deploy/sakura_perps.so
+        run: cargo test -p sakura-perps-svm-tests --locked -- --nocapture
+
   guardrails:
     name: Guardrails
     runs-on: ubuntu-latest

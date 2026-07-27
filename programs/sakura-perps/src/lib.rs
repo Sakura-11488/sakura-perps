@@ -35,6 +35,8 @@
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::Mint;
+use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
+use sakura_perps_risk::oracle::OracleGuards;
 
 pub mod oracle;
 
@@ -111,6 +113,109 @@ pub mod sakura_perps {
 
         Ok(())
     }
+
+    /// Validate a price feed against a set of guards and emit the result.
+    ///
+    /// Changes no state. Its purpose is to answer, on chain and against the real
+    /// account, the question that must be settled before a feed is qualified:
+    /// *does this feed currently produce a price this protocol would trade on?*
+    /// Guessing at that off-chain is how a market ends up listed against a feed
+    /// with the wrong exponent, or one that stopped updating last Tuesday.
+    ///
+    /// Permissionless, because it is a read with no effect. It is also where an
+    /// operator should start when a market has stopped trading and nobody knows
+    /// which of the seven checks is failing — the returned error names it.
+    ///
+    /// # Why `feed_id` comes from instruction data here, and must not elsewhere
+    ///
+    /// A probe asks "does *this* account satisfy *these* guards for *this*
+    /// feed", so all three necessarily come from the caller. Every instruction
+    /// that moves money must instead take `feed_id` from the market's stored
+    /// configuration. A caller-supplied id would simply be set to match whatever
+    /// account was handed over, turning the SDK's feed-id check — the thing
+    /// stopping a BONK price from reaching a SOL market — into a no-op.
+    pub fn probe_oracle(ctx: Context<ProbeOracle>, params: ProbeOracleParams) -> Result<()> {
+        let guards = OracleGuards {
+            max_age_seconds: params.max_age_seconds,
+            max_age_slots: params.max_age_slots,
+            max_future_skew_seconds: params.max_future_skew_seconds,
+            max_confidence_bps: params.max_confidence_bps,
+            min_price: params.min_price,
+            max_price: params.max_price,
+            expected_exponent: params.expected_exponent,
+        };
+
+        let clock = Clock::get()?;
+        let validated =
+            oracle::load_price(&ctx.accounts.price_update, &params.feed_id, &guards, &clock)?;
+
+        emit!(OracleProbed {
+            price_update: ctx.accounts.price_update.key(),
+            feed_id: params.feed_id,
+            price: validated.price,
+            confidence: validated.confidence,
+            publish_time: validated.publish_time,
+            posted_slot: validated.posted_slot,
+            probed_at_slot: clock.slot,
+        });
+
+        Ok(())
+    }
+}
+
+/// Arguments to [`sakura_perps::probe_oracle`].
+///
+/// Every guard is explicit rather than defaulted. A probe whose thresholds were
+/// implicit would answer a different question from the one the caller asked, and
+/// the whole point is to establish exactly which threshold a feed fails.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct ProbeOracleParams {
+    /// The 32-byte Pyth feed id this account is expected to carry.
+    pub feed_id: [u8; 32],
+    /// Maximum age by upstream publish time, in seconds.
+    pub max_age_seconds: u32,
+    /// Maximum age by slots since the update landed on chain.
+    pub max_age_slots: u64,
+    /// Tolerance for a publish time ahead of the cluster clock, in seconds.
+    pub max_future_skew_seconds: u32,
+    /// Maximum confidence interval as a fraction of price, in basis points.
+    pub max_confidence_bps: u16,
+    /// Lower bound of the sanity band, at `PRICE_SCALE`.
+    pub min_price: u128,
+    /// Upper bound of the sanity band, at `PRICE_SCALE`.
+    pub max_price: u128,
+    /// The exponent the feed is expected to publish.
+    pub expected_exponent: i32,
+}
+
+/// Accounts for [`sakura_perps::probe_oracle`].
+#[derive(Accounts)]
+pub struct ProbeOracle<'info> {
+    /// The Pyth price update to inspect.
+    ///
+    /// `Account<PriceUpdateV2>` enforces that this is genuinely owned by the
+    /// Pyth receiver program; an arbitrary account with convincing-looking bytes
+    /// fails deserialisation rather than being believed.
+    pub price_update: Box<Account<'info, PriceUpdateV2>>,
+}
+
+/// Emitted by [`sakura_perps::probe_oracle`] when a feed passes every check.
+#[event]
+pub struct OracleProbed {
+    /// The price update account inspected.
+    pub price_update: Pubkey,
+    /// The feed id it was checked against.
+    pub feed_id: [u8; 32],
+    /// Validated price, at `PRICE_SCALE`.
+    pub price: u128,
+    /// Validated confidence interval, at `PRICE_SCALE`.
+    pub confidence: u128,
+    /// Upstream publish time.
+    pub publish_time: i64,
+    /// Slot at which the update landed on chain.
+    pub posted_slot: u64,
+    /// Slot at which the probe ran, so staleness is reconstructible from the log.
+    pub probed_at_slot: u64,
 }
 
 /// Arguments to [`sakura_perps::initialize_exchange`].

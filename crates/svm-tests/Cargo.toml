@@ -1,0 +1,24 @@
+[package]
+name = "sakura-perps-svm-tests"
+version = "0.1.0"
+description = "In-process SVM integration tests for Sakura Perps."
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+# LiteSVM rather than solana-program-test: roughly an order of magnitude faster,
+# synchronous, and — the reason it is chosen here — `set_account` lets a test
+# write arbitrary bytes into any account. That is what makes a stale or
+# wide-confidence Pyth feed testable in milliseconds instead of unreachable.
+litesvm = "0.15"
+solana-sdk = "2"
+anchor-lang = "1.1.2"
+pyth-solana-receiver-sdk = "2.0.0"
+sakura-perps = { path = "../../programs/sakura-perps", features = ["no-entrypoint"] }
+sakura-perps-risk = { path = "../risk" }
