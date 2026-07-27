@@ -470,7 +470,7 @@ proptest! {
     /// Zero elapsed time accrues nothing, in either index.
     #[test]
     fn no_time_no_accrual(rate in 0u128..1_000_000u128, utilization in 0u128..10_000u128) {
-        prop_assert_eq!(borrow_index_delta(rate, utilization, 0).unwrap(), 0);
+        prop_assert_eq!(borrow_index_delta(rate, utilization, 0, 0).unwrap().index_delta, 0);
         prop_assert_eq!(funding_index_delta(rate as i128, 0).unwrap(), 0);
     }
 
@@ -481,9 +481,73 @@ proptest! {
         rate in 1u128..1_000_000u128, utilization in 1u128..10_000u128,
         seconds in 0u64..86_400, extra in 0u64..86_400,
     ) {
-        let base = borrow_index_delta(rate, utilization, seconds).unwrap();
-        let longer = borrow_index_delta(rate, utilization, seconds + extra).unwrap();
-        prop_assert!(longer >= base);
+        let base = borrow_index_delta(rate, utilization, seconds, 0).unwrap();
+        let longer = borrow_index_delta(rate, utilization, seconds + extra, 0).unwrap();
+        prop_assert!(longer.index_delta >= base.index_delta);
+    }
+
+    /// **Borrow accrual is exactly additive over subdivisions of an interval.**
+    ///
+    /// This is the property whose absence hid a real defect. The suite already
+    /// checked monotonicity in elapsed time, which the broken implementation
+    /// satisfied perfectly — accruing more over a longer period is trivially
+    /// true even when accruing almost nothing over any period.
+    ///
+    /// Before the remainder carry, `rate = 100_000, utilization = 359 bps` gave
+    /// an index delta of 3_590 over one 3_600-second call and **exactly zero**
+    /// over 3_600 one-second calls, because each individual call floored to
+    /// nothing. Borrow fees are the pool's primary income, and they evaporated
+    /// as a function of how often the market happened to be settled — worst
+    /// under exactly the settle-often cadence the design recommends.
+    #[test]
+    fn borrow_accrual_is_additive_over_subdivisions(
+        rate in 1u128..10_000_000u128,
+        utilization in 1u128..=10_000u128,
+        step_seconds in 1u64..600,
+        steps in 1u64..500,
+    ) {
+        let total_seconds = step_seconds * steps;
+
+        let single = borrow_index_delta(rate, utilization, total_seconds, 0).unwrap();
+
+        let mut accumulated = 0u128;
+        let mut carry = 0u128;
+        for _ in 0..steps {
+            let step = borrow_index_delta(rate, utilization, step_seconds, carry).unwrap();
+            accumulated += step.index_delta;
+            carry = step.remainder;
+        }
+
+        prop_assert_eq!(
+            accumulated, single.index_delta,
+            "subdividing {} seconds into {} steps of {} changed the accrual: \
+             {} vs {} (rate={}, utilization={})",
+            total_seconds, steps, step_seconds, accumulated, single.index_delta,
+            rate, utilization
+        );
+    }
+
+    /// The carried remainder is always less than the divisor, so it cannot grow
+    /// without bound and cannot itself overflow across a long-lived market.
+    #[test]
+    fn borrow_remainder_stays_bounded(
+        rate in 1u128..10_000_000u128,
+        utilization in 1u128..=10_000u128,
+        seconds in 1u64..86_400,
+        carry_in in 0u128..36_000_000u128,
+    ) {
+        let step = borrow_index_delta(rate, utilization, seconds, carry_in).unwrap();
+        prop_assert!(step.remainder < 10_000 * 3_600);
+    }
+
+    /// A zero-length or zero-rate step preserves the carry rather than
+    /// discarding it. Zeroing it would silently destroy value every time
+    /// utilisation briefly touched zero.
+    #[test]
+    fn a_no_op_step_preserves_the_carry(carry in 0u128..36_000_000u128) {
+        prop_assert_eq!(borrow_index_delta(100, 100, 0, carry).unwrap().remainder, carry);
+        prop_assert_eq!(borrow_index_delta(0, 100, 60, carry).unwrap().remainder, carry);
+        prop_assert_eq!(borrow_index_delta(100, 0, 60, carry).unwrap().remainder, carry);
     }
 }
 
