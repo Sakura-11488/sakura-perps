@@ -684,13 +684,23 @@ proptest! {
     /// Staleness is monotone: if a price is rejected as stale at some age, it is
     /// still rejected at any greater age. A non-monotone check has a window
     /// somewhere that lets an old price through.
+    ///
+    /// `age` is derived from the guard rather than written as a literal. The
+    /// first version generated ages from 31, encoding a 30-second threshold that
+    /// was later widened to 60 after measuring the live feed. The test kept
+    /// passing because the generator happened not to sample the 31-to-60 gap;
+    /// bumping proptest changed the seed and it failed immediately. A test that
+    /// hardcodes the boundary it is checking will eventually be checking a
+    /// boundary that no longer exists.
     #[test]
     fn staleness_rejection_is_monotone(
         now in 1_000_000i64..2_000_000_000i64,
-        age in 31i64..100_000i64,
+        over in 1i64..100_000i64,
         extra in 0i64..100_000i64,
     ) {
         let guards = OracleGuards::for_trading(0, u128::MAX, -8);
+        // Always strictly beyond the limit, whatever the limit currently is.
+        let age = guards.max_age_seconds as i64 + over;
         let at = |a: i64| {
             let raw = RawPrice {
                 mantissa: 12_345_000_000,

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 7a6aba4deb18652375c445b8d11b3c433fc7620a7832311bc0bf0decb99efd29 # shrinks to sd = Long, s = 60461775996, entry = 6546930219958, collateral = 1551243, maintenance = 106, decimals = 6
+cc e51b0e9e3bddd45d1a01ae1cf752e31d4dfd18870120fb1aaf720236a52fdf70 # shrinks to now = 1000000, age = 31, extra = 0
