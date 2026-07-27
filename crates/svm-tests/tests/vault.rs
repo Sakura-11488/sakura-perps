@@ -273,12 +273,19 @@ impl Fixture {
     }
 
     fn token_balance(&self, account: Address) -> u64 {
+        // SPL token account layout: mint(32), owner(32), amount(8, little
+        // endian). Read directly rather than pulling in a token crate whose
+        // `Pubkey` belongs to a different `solana-pubkey` version — that is
+        // exactly what made the previous attempt fail to compile.
         let raw = self
             .svm
             .get_account(&account)
             .expect("token account exists");
-        let parsed = spl_token::state::Account::unpack(&raw.data).expect("token account decodes");
-        parsed.amount
+        u64::from_le_bytes(
+            raw.data[64..72]
+                .try_into()
+                .expect("token account is long enough to hold an amount"),
+        )
     }
 
     /// Move the cluster clock forward so a withdrawal delay can elapse.
