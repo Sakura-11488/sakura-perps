@@ -30,14 +30,14 @@ use anchor_lang::{AnchorSerialize, Discriminator, InstructionData, ToAccountMeta
 use litesvm::LiteSVM;
 use pyth_solana_receiver_sdk::price_update::{PriceUpdateV2, VerificationLevel};
 use sakura_perps::PerpsError;
-use solana_sdk::{
-    account::Account,
-    clock::Clock,
-    instruction::{Instruction, InstructionError},
-    pubkey::Pubkey,
-    signature::{Keypair, Signer},
-    transaction::{Transaction, TransactionError},
-};
+use solana_account::Account;
+use solana_address::Address;
+use solana_clock::Clock;
+use solana_instruction::{error::InstructionError, Instruction};
+use solana_keypair::Keypair;
+use solana_signer::Signer;
+use solana_transaction::Transaction;
+use solana_transaction_error::TransactionError;
 
 /// Feed id used throughout. Arbitrary but fixed, so a mismatch is deliberate.
 const FEED_ID: [u8; 32] = [7u8; 32];
@@ -70,7 +70,7 @@ fn price_update_account(
     posted_slot: u64,
 ) -> Account {
     let update = PriceUpdateV2 {
-        write_authority: Pubkey::new_unique(),
+        write_authority: Address::new_unique(),
         // Anything less than Full and `get_price_no_older_than` rejects it
         // outright — which is a behaviour worth relying on, not working around.
         verification_level: VerificationLevel::Full,
@@ -153,7 +153,7 @@ fn probe(account: Account, feed_id: [u8; 32], guards: Guards) -> Result<(), Tran
     svm.airdrop(&payer.pubkey(), 10_000_000_000)
         .expect("airdrop");
 
-    let price_update = Pubkey::new_unique();
+    let price_update = Address::new_unique();
     svm.set_account(price_update, account).expect("set account");
 
     let instruction = Instruction {
@@ -395,7 +395,7 @@ fn an_account_not_owned_by_the_pyth_receiver_is_refused() {
         NOW_UNIX - 1,
         NOW_SLOT - 1,
     );
-    account.owner = Pubkey::new_unique();
+    account.owner = Address::new_unique();
 
     let result = probe(account, FEED_ID, Guards::default());
     assert!(
