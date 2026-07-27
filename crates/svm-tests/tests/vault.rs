@@ -376,6 +376,11 @@ fn a_donation_to_the_vault_cannot_move_the_share_price() {
 
     // A second deposit of the same size must mint the same number of shares as
     // the first did, to within the locked minimum.
+    //
+    // The blockhash has to move first. An identical amount from the same signer
+    // against the same accounts produces a byte-identical transaction, which the
+    // runtime rejects as `AlreadyProcessed` — nothing to do with the pool.
+    fixture.svm.expire_blockhash();
     fixture.deposit(1_000 * ONE, 1).expect("second deposit");
 
     let minted = fixture.token_balance(fixture.lp_share_account) - shares_before;
@@ -506,9 +511,7 @@ fn the_wrong_token_program_is_refused() {
     // Swap legacy SPL Token for Token-2022.
     for meta in instruction.accounts.iter_mut() {
         if meta.pubkey == spl_token_id() {
-            meta.pubkey = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-                .parse()
-                .unwrap();
+            meta.pubkey = token_2022_id();
         }
     }
     let lp = fixture.lp.insecure_clone();
