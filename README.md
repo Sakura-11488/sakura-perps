@@ -139,6 +139,24 @@ Source-to-bytecode traceability. Every deploy gets a row.
 | Cluster | Program id | `.so` sha256 | Tag | Date | Upgrade authority |
 |---|---|---|---|---|---|
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `cb1fee92…f717289c` | `devnet-v0.1.0` | 2026-07-27 | `5JSAncTb…dKP` |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `569798fe…0e324d47` | `devnet-v0.2.0` | 2026-07-27 | `5JSAncTb…dKP` |
+
+### Oracle validation, verified on devnet
+
+`devnet-v0.2.0` was checked against the live sponsored Pyth SOL/USD feed
+(`7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE`) in both directions:
+
+| Guards | Result |
+|---|---|
+| normal — 60 s, 100 bps | **accepted**, $75.5164, confidence 3.6 bps, slot age 5 |
+| `max_age` 1 s | rejected |
+| `max_confidence` 1 bps | rejected |
+| `expected_exponent` −6 | rejected |
+| sanity band $1000–2000 | rejected |
+| wrong `feed_id` | rejected |
+
+The rejections are the point. A guard that only ever passes is indistinguishable
+from no guard at all.
 
 The deployed binary is the artifact CI produced, not a local build. `solana
 program dump` returns bytes whose sha256 matches the CI artifact exactly, so the
