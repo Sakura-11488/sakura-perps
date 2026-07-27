@@ -36,6 +36,8 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::Mint;
 
+pub mod oracle;
+
 declare_id!("5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y");
 
 /// Basis-point denominator. 10_000 bps == 100%.
@@ -209,4 +211,35 @@ pub enum PerpsError {
     CollateralMintIsFreezable,
     #[msg("Arithmetic overflow.")]
     MathOverflow,
+
+    // ── Oracle ──────────────────────────────────────────────────────────────
+    // Each rejection keeps its own variant. An operator debugging a market that
+    // has stopped trading needs to know whether the feed is stale, has widened,
+    // or has drifted outside its band -- those have different responses.
+    #[msg("Oracle price could not be read, or failed Pyth verification.")]
+    OraclePriceUnavailable,
+    #[msg("Oracle price is older than this market permits.")]
+    OracleStale,
+    #[msg("Oracle confidence interval is too wide to trade on.")]
+    OracleConfidenceTooWide,
+    #[msg("Oracle price is outside the market's configured sanity band.")]
+    OraclePriceOutOfBand,
+    #[msg("Oracle exponent differs from the value recorded when the feed was qualified.")]
+    OracleExponentChanged,
+    #[msg("Oracle price claims to have been published in the future.")]
+    OraclePriceFromTheFuture,
+    #[msg("Oracle price is zero or negative.")]
+    OracleInvalidPrice,
+
+    // ── Mapped from the risk crate ──────────────────────────────────────────
+    #[msg("Amount must be non-negative.")]
+    NegativeAmount,
+    #[msg("Position size must be non-zero.")]
+    ZeroSize,
+    #[msg("Basis points exceed 10000.")]
+    InvalidBasisPoints,
+    #[msg("Pool has no shares outstanding.")]
+    EmptyPool,
+    #[msg("Initial margin must exceed maintenance margin plus liquidation fee.")]
+    InvalidMarginParameters,
 }

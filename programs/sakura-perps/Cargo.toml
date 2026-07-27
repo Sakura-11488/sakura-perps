@@ -36,6 +36,10 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 # add a `create_*` instruction instead.
 anchor-lang = { version = "1.1.2", features = ["event-cpi"] }
 anchor-spl = "1.1.2"
+# Requires anchor-lang ^1.0.2 — the reason the Anchor 1.x migration in milestone 1
+# mattered. On 0.32.1 this would be pinned to the older 1.2.0 line.
+pyth-solana-receiver-sdk = "2.0.0"
+sakura-perps-risk = { path = "../../crates/risk" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

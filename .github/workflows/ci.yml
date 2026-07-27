@@ -200,8 +200,17 @@ jobs:
           echo "ok"
 
       - name: No unchecked oracle reads
+        # Pyth's own documentation warns that get_price_unchecked skips both
+        # recency and Wormhole verification. Trading on an unverified price is
+        # the shortest path to draining an oracle-and-pool venue.
+        #
+        # Matched as a CALL — `.get_price_unchecked(` — not as a bare name. This
+        # is the second guardrail to trip on its own documentation: the comment
+        # in programs/sakura-perps/src/oracle.rs explaining why we never call it
+        # failed this check. Prose about a rule must not violate the rule, so
+        # every guardrail here matches the call form.
         run: |
-          if grep -rn "get_price_unchecked" programs/ crates/ ; then
+          if grep -rn --include='*.rs' '\.get_price_unchecked(' programs/*/src crates/*/src ; then
             echo "::error::get_price_unchecked skips verification and staleness."
             exit 1
           fi

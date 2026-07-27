@@ -44,9 +44,9 @@
 
 use crate::error::RiskError;
 use crate::math::pow10;
-use crate::scale::{BPS_DENOMINATOR, PRICE_SCALE};
+use crate::scale::BPS_DENOMINATOR;
 
-/// Decimal exponent of [`PRICE_SCALE`]. `1e10` is `10^10`.
+/// Decimal exponent of [`crate::scale::PRICE_SCALE`]. `1e10` is `10^10`.
 const PRICE_SCALE_EXPONENT: i32 = 10;
 
 /// Widest exponent range a feed may declare.
@@ -91,9 +91,9 @@ pub struct OracleGuards {
     pub max_future_skew_seconds: u32,
     /// Maximum confidence interval as a fraction of price, in basis points.
     pub max_confidence_bps: u16,
-    /// Lower bound of the sanity band, at [`PRICE_SCALE`].
+    /// Lower bound of the sanity band, at [`crate::scale::PRICE_SCALE`].
     pub min_price: u128,
-    /// Upper bound of the sanity band, at [`PRICE_SCALE`].
+    /// Upper bound of the sanity band, at [`crate::scale::PRICE_SCALE`].
     pub max_price: u128,
     /// The exponent recorded when this feed was qualified.
     pub expected_exponent: i32,
@@ -139,12 +139,12 @@ impl OracleGuards {
     }
 }
 
-/// A price that has passed every check, normalised to [`PRICE_SCALE`].
+/// A price that has passed every check, normalised to [`crate::scale::PRICE_SCALE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValidatedPrice {
-    /// Price at [`PRICE_SCALE`]. Always strictly positive.
+    /// Price at [`crate::scale::PRICE_SCALE`]. Always strictly positive.
     pub price: u128,
-    /// Confidence interval at [`PRICE_SCALE`].
+    /// Confidence interval at [`crate::scale::PRICE_SCALE`].
     pub confidence: u128,
     /// Upstream publish time, carried through for event emission.
     pub publish_time: i64,
@@ -152,7 +152,7 @@ pub struct ValidatedPrice {
     pub posted_slot: u64,
 }
 
-/// Convert a mantissa and decimal exponent to [`PRICE_SCALE`].
+/// Convert a mantissa and decimal exponent to [`crate::scale::PRICE_SCALE`].
 ///
 /// # Rounding
 ///
@@ -213,9 +213,17 @@ pub fn validate_price(
     // far-future timestamp cannot turn the staleness check into a permanent
     // bypass by making the elapsed time negative.
     if raw.publish_time > now_unix {
-        let skew = raw.publish_time.saturating_sub(now_unix);
-        if skew > guards.max_future_skew_seconds as i64 {
-            return Err(RiskError::PriceFromTheFuture);
+        match raw.publish_time.checked_sub(now_unix) {
+            // A skew too large to fit in an i64 is emphatically in the future.
+            // Reachable only with absurd inputs. The alternative, `saturating_sub`,
+            // happens to clamp in the safe direction here — but relying on that
+            // means reasoning about clamp direction case by case, which is
+            // precisely what the no-saturating rule exists to avoid.
+            None => return Err(RiskError::PriceFromTheFuture),
+            Some(skew) if skew > guards.max_future_skew_seconds as i64 => {
+                return Err(RiskError::PriceFromTheFuture)
+            }
+            Some(_) => {}
         }
     } else {
         let age = now_unix
@@ -295,6 +303,7 @@ pub fn diverges_beyond(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scale::PRICE_SCALE;
 
     fn guards() -> OracleGuards {
         OracleGuards::for_trading(1, u128::MAX, -8)
@@ -315,7 +324,7 @@ mod tests {
         // $123.45 at exponent -8 is 12_345_000_000.
         assert_eq!(
             normalize_price(12_345_000_000, -8).unwrap(),
-            123_45 * PRICE_SCALE / 100
+            12_345 * PRICE_SCALE / 100
         );
     }
 
