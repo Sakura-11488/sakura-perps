@@ -28,6 +28,18 @@ pub enum RiskError {
     /// Initial margin does not exceed maintenance margin plus the liquidation
     /// fee, which would make a freshly opened position immediately liquidatable.
     InvalidMarginParameters,
+    /// The oracle price is older than the caller permits, by wall-clock time or
+    /// by slots since it landed on chain.
+    StalePrice,
+    /// The oracle price carries a confidence interval too wide to trade on.
+    ConfidenceTooWide,
+    /// The oracle price is outside the sanity band configured for this market.
+    PriceOutOfBand,
+    /// The oracle's exponent is not the one recorded when the feed was
+    /// qualified, so every price it produces would be silently rescaled.
+    UnexpectedExponent,
+    /// The oracle price claims to have been published in the future.
+    PriceFromTheFuture,
 }
 
 impl core::fmt::Display for RiskError {
@@ -43,6 +55,11 @@ impl core::fmt::Display for RiskError {
             Self::InvalidMarginParameters => {
                 "initial margin must exceed maintenance margin plus liquidation fee"
             }
+            Self::StalePrice => "oracle price is too old",
+            Self::ConfidenceTooWide => "oracle confidence interval is too wide to trade on",
+            Self::PriceOutOfBand => "oracle price is outside the configured sanity band",
+            Self::UnexpectedExponent => "oracle exponent differs from the qualified value",
+            Self::PriceFromTheFuture => "oracle price is published in the future",
         };
         f.write_str(message)
     }

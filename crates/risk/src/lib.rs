@@ -33,6 +33,7 @@
 //! | [`position`] | notional, PnL, equity, margin, liquidation price |
 //! | [`pool`] | LP share pricing, utilisation, withdrawal safety |
 //! | [`funding`] | funding and borrow index accrual |
+//! | [`oracle`] | price validation: staleness, confidence, sanity bands |
 //! | [`error`] | [`RiskError`] |
 
 #![deny(missing_docs)]
@@ -41,6 +42,7 @@
 pub mod error;
 pub mod funding;
 pub mod math;
+pub mod oracle;
 pub mod pool;
 pub mod position;
 pub mod scale;

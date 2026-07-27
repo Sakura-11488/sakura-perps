@@ -607,3 +607,158 @@ proptest! {
         prop_assert_eq!(first, second);
     }
 }
+
+// ── Oracle validation ───────────────────────────────────────────────────────
+
+use sakura_perps_risk::oracle::{
+    diverges_beyond, normalize_price, validate_price, OracleGuards, RawPrice, MAX_EXPONENT,
+    MIN_EXPONENT,
+};
+
+fn raw_price() -> impl Strategy<Value = RawPrice> {
+    (
+        any::<i64>(),
+        any::<u64>(),
+        MIN_EXPONENT - 5..MAX_EXPONENT + 5,
+        any::<i64>(),
+        any::<u64>(),
+    )
+        .prop_map(
+            |(mantissa, confidence, exponent, publish_time, posted_slot)| RawPrice {
+                mantissa,
+                confidence,
+                exponent,
+                publish_time,
+                posted_slot,
+            },
+        )
+}
+
+proptest! {
+    /// Oracle validation never panics, for any input at all — including
+    /// adversarial exponents and timestamps. This is the whole surface an
+    /// attacker controls, so it gets the fully unconstrained treatment.
+    #[test]
+    fn oracle_validation_never_panics(
+        raw in raw_price(), now in any::<i64>(), slot in any::<u64>(),
+        max_conf in any::<u16>(), expected_exponent in any::<i32>(),
+    ) {
+        let guards = OracleGuards {
+            max_age_seconds: 30,
+            max_age_slots: 150,
+            max_future_skew_seconds: 5,
+            max_confidence_bps: max_conf,
+            min_price: 0,
+            max_price: u128::MAX,
+            expected_exponent,
+        };
+        let _ = validate_price(raw, &guards, now, slot);
+        let _ = normalize_price(raw.mantissa, raw.exponent);
+    }
+
+    /// A price published meaningfully in the future is ALWAYS rejected.
+    ///
+    /// This is the check most often missed, and getting it wrong inverts
+    /// staleness into a permanent bypass: a naive `now - publish_time > limit`
+    /// test computes a negative age for a future timestamp and accepts the price
+    /// forever.
+    #[test]
+    fn a_future_price_is_always_rejected(
+        now in 1_000_000i64..2_000_000_000i64,
+        ahead in 6i64..1_000_000_000i64,
+    ) {
+        let guards = OracleGuards::for_trading(0, u128::MAX, -8);
+        let raw = RawPrice {
+            mantissa: 12_345_000_000,
+            confidence: 0,
+            exponent: -8,
+            publish_time: now.saturating_add(ahead),
+            posted_slot: 100,
+        };
+        prop_assert_eq!(
+            validate_price(raw, &guards, now, 100),
+            Err(RiskError::PriceFromTheFuture)
+        );
+    }
+
+    /// Staleness is monotone: if a price is rejected as stale at some age, it is
+    /// still rejected at any greater age. A non-monotone check has a window
+    /// somewhere that lets an old price through.
+    #[test]
+    fn staleness_rejection_is_monotone(
+        now in 1_000_000i64..2_000_000_000i64,
+        age in 31i64..100_000i64,
+        extra in 0i64..100_000i64,
+    ) {
+        let guards = OracleGuards::for_trading(0, u128::MAX, -8);
+        let at = |a: i64| {
+            let raw = RawPrice {
+                mantissa: 12_345_000_000,
+                confidence: 0,
+                exponent: -8,
+                publish_time: now - a,
+                posted_slot: 100,
+            };
+            validate_price(raw, &guards, now, 100)
+        };
+        prop_assert_eq!(at(age), Err(RiskError::StalePrice));
+        prop_assert_eq!(at(age + extra), Err(RiskError::StalePrice));
+    }
+
+    /// Anything acceptable for trading is acceptable for liquidation.
+    ///
+    /// Liquidation guards must be strictly looser. If a price were good enough
+    /// to open a position against but not good enough to close one, positions
+    /// could be entered and then become impossible to liquidate — bad debt by
+    /// construction.
+    #[test]
+    fn trading_guards_are_strictly_tighter_than_liquidation_guards(
+        raw in raw_price(), now in any::<i64>(), slot in any::<u64>(),
+    ) {
+        let trading = OracleGuards::for_trading(0, u128::MAX, raw.exponent);
+        let liquidation = OracleGuards::for_liquidation(0, u128::MAX, raw.exponent);
+
+        if validate_price(raw, &trading, now, slot).is_ok() {
+            prop_assert!(
+                validate_price(raw, &liquidation, now, slot).is_ok(),
+                "a price good enough to trade on was rejected for liquidation"
+            );
+        }
+    }
+
+    /// Normalisation is monotone in the mantissa: a larger mantissa at the same
+    /// exponent is never a smaller price.
+    #[test]
+    fn normalisation_is_monotone_in_the_mantissa(
+        a in 1i64..i64::MAX/2, b in 1i64..i64::MAX/2, exponent in MIN_EXPONENT..=MAX_EXPONENT,
+    ) {
+        let (low, high) = if a <= b { (a, b) } else { (b, a) };
+        if let (Ok(low), Ok(high)) = (normalize_price(low, exponent), normalize_price(high, exponent)) {
+            prop_assert!(high >= low);
+        }
+    }
+
+    /// A non-positive mantissa is always rejected, whatever the exponent. Pyth's
+    /// price field is genuinely signed, so this is a real input.
+    #[test]
+    fn a_non_positive_mantissa_is_always_rejected(
+        mantissa in i64::MIN..=0i64, exponent in any::<i32>()
+    ) {
+        prop_assert_eq!(normalize_price(mantissa, exponent), Err(RiskError::InvalidPrice));
+    }
+
+    /// Divergence is symmetric: a spike and a crash of the same magnitude are
+    /// treated identically. An asymmetric check would let manipulation through
+    /// in one direction.
+    #[test]
+    fn divergence_is_symmetric(reference in 1_000_000u128..1_000_000_000_000u128, gap in 0u128..500_000_000u128, bps in bps()) {
+        let above = reference.saturating_add(gap);
+        let below = reference.saturating_sub(gap);
+        if let (Ok(up), Ok(down)) = (
+            diverges_beyond(above, reference, bps),
+            diverges_beyond(below, reference, bps),
+        ) {
+            prop_assert_eq!(up, down, "divergence treated a spike differently from a crash");
+        }
+    }
+}
