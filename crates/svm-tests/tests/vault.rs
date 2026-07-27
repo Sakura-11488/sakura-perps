@@ -15,7 +15,6 @@ use litesvm::LiteSVM;
 use litesvm_token::{CreateAssociatedTokenAccount, CreateMint, MintTo};
 use sakura_perps::pool::{InitializePoolParams, Pool};
 use sakura_perps::{InitializeExchangeParams, PerpsError};
-use solana_account::Account;
 use solana_address::Address;
 use solana_clock::Clock;
 use solana_instruction::{error::InstructionError, Instruction};
@@ -23,6 +22,28 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 use solana_transaction_error::TransactionError;
+
+/// Legacy SPL Token program. Parsed rather than imported from `spl-token`,
+/// whose `Pubkey` comes from a different `solana-pubkey` version and therefore
+/// is not the same type as everything else here.
+fn spl_token_id() -> Address {
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        .parse()
+        .unwrap()
+}
+
+/// Token-2022, for the wrong-program test.
+fn token_2022_id() -> Address {
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        .parse()
+        .unwrap()
+}
+
+fn rent_sysvar_id() -> Address {
+    "SysvarRent111111111111111111111111111111111"
+        .parse()
+        .unwrap()
+}
 
 const COLLATERAL_DECIMALS: u8 = 6;
 /// One whole collateral token.
@@ -206,9 +227,9 @@ impl Fixture {
                 quote_vault: self.quote_vault,
                 share_mint: self.share_mint,
                 pool_share_account: self.pool_share_account,
-                token_program: spl_token::ID,
+                token_program: spl_token_id(),
                 system_program: anchor_lang::system_program::ID,
-                rent: anchor_lang::solana_program::sysvar::rent::ID,
+                rent: rent_sysvar_id(),
             }
             .to_account_metas(None),
             data: sakura_perps::instruction::InitializePool { params }.data(),
@@ -228,7 +249,7 @@ impl Fixture {
                 depositor_token_account: self.lp_token_account,
                 depositor_share_account: self.lp_share_account,
                 pool_share_account: self.pool_share_account,
-                token_program: spl_token::ID,
+                token_program: spl_token_id(),
             }
             .to_account_metas(None),
             data: sakura_perps::instruction::LpDeposit {
@@ -268,8 +289,6 @@ impl Fixture {
         self.svm.set_sysvar(&clock);
     }
 }
-
-use solana_program_pack::Pack;
 
 fn default_params() -> InitializePoolParams {
     InitializePoolParams {
@@ -479,7 +498,7 @@ fn the_wrong_token_program_is_refused() {
     let mut instruction = fixture.deposit_ix(1_000 * ONE, 1);
     // Swap legacy SPL Token for Token-2022.
     for meta in instruction.accounts.iter_mut() {
-        if meta.pubkey == spl_token::ID {
+        if meta.pubkey == spl_token_id() {
             meta.pubkey = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
                 .parse()
                 .unwrap();
@@ -541,9 +560,9 @@ fn request_withdraw(fixture: &mut Fixture, shares: u64) -> Result<(), Transactio
             owner_share_account: fixture.lp_share_account,
             withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
             escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
-            token_program: spl_token::ID,
+            token_program: spl_token_id(),
             system_program: anchor_lang::system_program::ID,
-            rent: anchor_lang::solana_program::sysvar::rent::ID,
+            rent: rent_sysvar_id(),
         }
         .to_account_metas(None),
         data: sakura_perps::instruction::RequestWithdraw { shares }.data(),
@@ -566,7 +585,7 @@ fn lp_withdraw(fixture: &mut Fixture, min_amount_out: u64) -> Result<(), Transac
             withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
             escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
             owner_token_account: fixture.lp_token_account,
-            token_program: spl_token::ID,
+            token_program: spl_token_id(),
         }
         .to_account_metas(None),
         data: sakura_perps::instruction::LpWithdraw { min_amount_out }.data(),

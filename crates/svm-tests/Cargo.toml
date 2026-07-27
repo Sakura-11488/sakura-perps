@@ -32,8 +32,6 @@ solana-signer = "3.0"
 solana-transaction = "4.1"
 solana-instruction = "3.4"
 solana-transaction-error = "3.3"
-solana-program-pack = "3.1"
-spl-token = "8"
 anchor-lang = "1.1.2"
 pyth-solana-receiver-sdk = "2.0.0"
 sakura-perps = { path = "../../programs/sakura-perps", features = ["no-entrypoint"] }
