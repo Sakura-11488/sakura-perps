@@ -107,8 +107,17 @@ jobs:
       - name: Install Anchor
         # Direct tagged install, not avm. avm compiles the CLI from source on
         # every run, which is the usual reason Anchor CI is slow and flaky.
+        #
+        # Built with `stable`, deliberately not with RUST_TOOLCHAIN. The CLI is a
+        # host binary whose dependency tree moves independently of ours:
+        # anchor-cli 1.1.2 pulls cargo-platform 0.3.3, which requires rustc 1.91,
+        # while our program pins 1.89 because anchor-lang 1.1.2 requires exactly
+        # that. rust-toolchain.toml applies to anything run inside the repo, so
+        # without this override the program's pin leaks into the CLI build and
+        # fails it.
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor \
+          rustup toolchain install stable --profile minimal
+          RUSTUP_TOOLCHAIN=stable cargo install --git https://github.com/coral-xyz/anchor \
             --tag "v${ANCHOR_VERSION}" anchor-cli --locked
 
       - name: Versions
