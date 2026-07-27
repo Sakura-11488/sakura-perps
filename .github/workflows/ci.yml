@@ -1,0 +1,176 @@
+name: CI
+
+# The workflow this replaced had one run in its lifetime and it failed in six
+# seconds. It had three internal version contradictions (Rust 1.84.1 against a
+# rust-toolchain.toml pinning 1.89.0; Anchor CLI 0.30.1 against anchor-lang
+# 0.32.1; Solana 1.18.23 against solana-program 2.3.0), installed from
+# release.solana.com which no longer resolves, built inside the program
+# directory while uploading artifacts from the workspace root, and used
+# actions/upload-artifact@v3 — which has since been retired and hard-fails on
+# its own. Every one of those is fixed here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # One coherent set. These must agree with rust-toolchain.toml, Anchor.toml and
+  # programs/sakura-perps/Cargo.toml. The Anchor CLI version in particular must
+  # equal anchor-lang, or discriminators and the generated IDL diverge from what
+  # the deployed program expects.
+  RUST_TOOLCHAIN: "1.88.0"
+  SOLANA_VERSION: "3.0.14"
+  ANCHOR_VERSION: "0.32.1"
+  # Agave 3.0.14 bundles platform-tools v1.51, whose SBF Rust is 1.84.1 — older
+  # than the 1.85 that stabilised edition 2024. Several crates in anchor-spl's
+  # transitive tree now require it, so a v1.51 build dies with "feature
+  # `edition2024` is required" before compiling a line of our code. v1.54 ships
+  # Rust 1.89, which parses them. Pinned explicitly so local and CI agree.
+  PLATFORM_TOOLS_VERSION: "v1.54"
+
+jobs:
+  lint:
+    name: Lint and secret scan
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned to commit SHAs, not tags. A tag can be
+      # repointed; this repository is intended to hold money, so a compromised
+      # action would be a direct path to the deploy keys.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1 # master @ 2024-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # gitleaks earns its place here specifically: a sibling repository in this
+      # org published a BIP39 seed phrase to a public branch and it went
+      # unnoticed for four months.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build program
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1 # master @ 2024-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: Install Agave
+        # release.solana.com is retired; release.anza.xyz is the replacement.
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor
+        # Direct tagged install, not avm. avm compiles the CLI from source on
+        # every run, which is the usual reason Anchor CI is slow and flaky.
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor \
+            --tag "v${ANCHOR_VERSION}" anchor-cli --locked
+
+      - name: Install platform-tools ${{ env.PLATFORM_TOOLS_VERSION }}
+        # Must run before `anchor build`, which otherwise uses the v1.51 that
+        # Agave bundles. On Linux this just works; on Windows the same command
+        # fails with "Access is denied" because linking the rustup toolchain
+        # needs a directory junction, which requires elevation or Developer Mode.
+        run: cargo-build-sbf --tools-version "${PLATFORM_TOOLS_VERSION}" --install-only
+
+      - name: Versions
+        run: |
+          rustc --version
+          solana --version
+          anchor --version
+          cargo-build-sbf --version
+
+      - name: Build
+        # From the workspace root. Building inside the program directory writes
+        # to programs/*/target/ and never produces an IDL, which is what made the
+        # old artifact upload path wrong and the TypeScript tests unrunnable.
+        run: anchor build -- --tools-version "${PLATFORM_TOOLS_VERSION}"
+
+      - name: Verify program id matches declare_id!
+        # A mismatch between Anchor.toml and declare_id! surfaces at runtime as
+        # DeclaredProgramIdMismatch and costs an hour to diagnose. Catch it here.
+        run: |
+          DECLARED=$(grep -oP 'declare_id!\("\K[^"]+' programs/sakura-perps/src/lib.rs)
+          CONFIGURED=$(grep -oP 'sakura_perps = "\K[^"]+' Anchor.toml | head -1)
+          echo "declare_id!: $DECLARED"
+          echo "Anchor.toml: $CONFIGURED"
+          test "$DECLARED" = "$CONFIGURED"
+
+      - name: Checksum
+        run: sha256sum target/deploy/sakura_perps.so | tee target/deploy/sakura_perps.so.sha256
+
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: program
+          path: |
+            target/deploy/sakura_perps.so
+            target/deploy/sakura_perps.so.sha256
+            target/idl/sakura_perps.json
+            target/types/sakura_perps.ts
+          if-no-files-found: error
+
+  guardrails:
+    name: Guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # These greps encode mistakes that have already been made in this
+      # organisation, twice each. They are cheap and they never regress.
+      - name: No legacy SPL Token types
+        # Two sibling programs used anchor_spl::token against a Token-2022 mint
+        # and were dead on arrival. Only token_interface accepts both programs.
+        run: |
+          if grep -rn "anchor_spl::token::" programs/ ; then
+            echo "::error::Use anchor_spl::token_interface, not anchor_spl::token."
+            exit 1
+          fi
+          echo "ok"
+
+      - name: No unchecked oracle reads
+        run: |
+          if grep -rn "get_price_unchecked" programs/ ; then
+            echo "::error::get_price_unchecked skips verification and staleness."
+            exit 1
+          fi
+          echo "ok"
+
+      - name: No saturating arithmetic in program code
+        # saturating_add silently corrupts accounting at the boundary instead of
+        # failing. A sibling program does exactly this to its deposit total.
+        run: |
+          if grep -rn "saturating_" programs/ ; then
+            echo "::error::Use checked_* with a named error, not saturating_*."
+            exit 1
+          fi
+          echo "ok"
