@@ -63,13 +63,19 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # gitleaks earns its place here specifically: a sibling repository in this
-      # org published a BIP39 seed phrase to a public branch and it went
+      # Secret scanning earns its place here specifically: a sibling repository
+      # in this org published a BIP39 seed phrase to a public branch and it went
       # unnoticed for four months.
+      #
+      # The gitleaks *action* requires a paid licence for organisation-owned
+      # repos and fails closed without one. The gitleaks *binary* is MIT and
+      # free, so install it directly and skip the licence check entirely.
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.7
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=8.21.2
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --redact --verbose --no-banner
 
   build:
     name: Build program
@@ -88,6 +94,12 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install build dependencies
+        # anchor-cli pulls hidapi for hardware-wallet support, whose build script
+        # needs libudev. Without this the Anchor install dies with
+        # "could not find system library 'libudev'".
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev
 
       - name: Install Anchor
         # Direct tagged install, not avm. avm compiles the CLI from source on
@@ -168,8 +180,13 @@ jobs:
       - name: No saturating arithmetic in program code
         # saturating_add silently corrupts accounting at the boundary instead of
         # failing. A sibling program does exactly this to its deposit total.
+        #
+        # Match the call form `.saturating_` rather than the bare word, so that
+        # documentation explaining why we avoid it does not trip its own check.
+        # The first version of this guardrail failed CI on the doc comment in
+        # lib.rs that tells you not to use saturating arithmetic.
         run: |
-          if grep -rn "saturating_" programs/ ; then
+          if grep -rn --include='*.rs' '\.saturating_' programs/ ; then
             echo "::error::Use checked_* with a named error, not saturating_*."
             exit 1
           fi
