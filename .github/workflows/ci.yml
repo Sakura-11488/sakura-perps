@@ -211,17 +211,21 @@ jobs:
           path: target
 
       - name: Assert the program binary is present
-        # The tests skip when the binary is missing, so a developer without a
-        # Solana toolchain still gets a green `cargo test`. That behaviour must
-        # not extend to CI: a skipped safety test reporting success is worse than
-        # no test at all. This is the check that makes the skip safe.
+        # Belt to the tests' braces. They now panic on a missing binary rather
+        # than skipping, so this is a clearer failure message rather than the
+        # only thing standing between a skip and a false green.
         run: |
-          test -f target/deploy/sakura_perps.so
-          ls -la target/deploy/sakura_perps.so
+          test -f "$GITHUB_WORKSPACE/target/deploy/sakura_perps.so"
+          ls -la "$GITHUB_WORKSPACE/target/deploy/sakura_perps.so"
 
       - name: Test
         env:
-          SAKURA_PERPS_SO: target/deploy/sakura_perps.so
+          # Absolute, deliberately. `cargo test` runs with the *crate* directory
+          # as its working directory, so a relative path resolved to
+          # crates/svm-tests/target/deploy/... while the step above checked the
+          # workspace root. Two different paths, one always missing: every test
+          # skipped, and the happy-path one reported success for doing nothing.
+          SAKURA_PERPS_SO: ${{ github.workspace }}/target/deploy/sakura_perps.so
         run: cargo test -p sakura-perps-svm-tests --locked -- --nocapture
 
   guardrails:

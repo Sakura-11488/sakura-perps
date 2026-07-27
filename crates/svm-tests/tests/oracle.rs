@@ -52,11 +52,44 @@ const NOW_SLOT: u64 = 100_000;
 const PRICE_MANTISSA: i64 = 12_345_000_000;
 const PRICE_EXPONENT: i32 = -8;
 
-/// Locate the compiled program, or `None` if it has not been built.
-fn program_binary() -> Option<Vec<u8>> {
+/// Load the compiled program, or fail loudly.
+///
+/// # Why this panics rather than skipping
+///
+/// It skipped, once, and the skip returned `Ok(())`. That meant
+/// `a_good_price_is_accepted` — whose entire assertion is `is_ok()` — **passed
+/// while executing nothing at all**. Eight sibling tests failed with "expected
+/// OracleStale, got Ok(())", and only that noise revealed the happy-path test
+/// was green for no reason.
+///
+/// The skip existed so a developer without a Solana toolchain would still get a
+/// green `cargo test`. Wrong trade, twice over: this crate cannot build without
+/// the Agave runtime anyway, so that green was never achievable — and a safety
+/// test that reports success without running is worse than one that does not
+/// exist. Absence is visible; false confidence is not.
+///
+/// The path resolves against the workspace root, not the process working
+/// directory, because `cargo test` runs with the *crate* directory as cwd. A
+/// relative `target/deploy/...` therefore pointed at
+/// `crates/svm-tests/target/deploy/...`, while the CI step asserting the file
+/// existed checked the workspace root. Two different paths, one always missing.
+fn program_binary() -> Vec<u8> {
     let path = std::env::var("SAKURA_PERPS_SO")
-        .unwrap_or_else(|_| "target/deploy/sakura_perps.so".to_string());
-    std::fs::read(&path).ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/deploy/sakura_perps.so")
+        });
+
+    std::fs::read(&path).unwrap_or_else(|err| {
+        panic!(
+            "cannot read the program binary at {}: {err}\n\
+             Build it with `anchor build`, or point SAKURA_PERPS_SO at an \
+             existing .so. These tests deliberately do not skip: a safety test \
+             that reports success without running is worse than no test.",
+            path.display()
+        )
+    })
 }
 
 /// Assemble a `PriceUpdateV2` account exactly as the Pyth receiver writes it:
@@ -131,16 +164,11 @@ impl Default for Guards {
 
 /// Run `probe_oracle` against a given account and guards.
 fn probe(account: Account, feed_id: [u8; 32], guards: Guards) -> Result<(), TransactionError> {
-    let Some(binary) = program_binary() else {
-        eprintln!(
-            "skipping: no program binary. Build it, or set SAKURA_PERPS_SO. \
-             CI asserts the file exists so this cannot silently pass there."
-        );
-        return Ok(());
-    };
+    let binary = program_binary();
 
     let mut svm = LiteSVM::new();
-    svm.add_program(sakura_perps::ID, &binary);
+    svm.add_program(sakura_perps::ID, &binary)
+        .expect("program loads into the SVM");
 
     // Pin the clock. Staleness is measured against this, so the assertions are
     // exact rather than a function of when the suite ran.
