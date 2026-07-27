@@ -126,7 +126,13 @@ jobs:
         # From the workspace root. Building inside the program directory writes
         # to programs/*/target/ and never produces an IDL, which is what made the
         # old artifact upload path wrong and the TypeScript tests unrunnable.
-        run: anchor build -- --tools-version "${PLATFORM_TOOLS_VERSION}"
+        #
+        # No --tools-version here. `anchor build --` forwards trailing arguments
+        # to the IDL build as well, which rejects the flag with "unexpected
+        # argument '--tools-version' found" after the program has already
+        # compiled successfully. The install step above leaves v1.54 as the
+        # active SBF toolchain, so the program picks it up regardless.
+        run: anchor build
 
       - name: Verify program id matches declare_id!
         # A mismatch between Anchor.toml and declare_id! surfaces at runtime as
