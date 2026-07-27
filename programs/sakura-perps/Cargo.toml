@@ -1,0 +1,41 @@
+[package]
+name = "sakura-perps"
+version = "0.1.0"
+description = "Permissionless oracle-and-pool perpetual futures on Solana"
+edition = "2021"
+license = "BUSL-1.1"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "sakura_perps"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+# Declared because Anchor's derive macros reference them via cfg. Without these,
+# every #[derive(Accounts)] emits an "unexpected cfg condition value" warning,
+# and CI runs clippy with -D warnings.
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+# Both halves are required. anchor-spl's own idl-build is only
+# ["anchor-lang/idl-build"], so omitting "anchor-spl/idl-build" here makes
+# `anchor build` fail to emit SPL account types into the IDL.
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+# The CLI version in Anchor.toml must match these exactly.
+#
+# Note what is NOT enabled: "init-if-needed". The design creates every account
+# through an explicit instruction, which removes both the compile failure that
+# killed the predecessor program and the re-initialization attack surface the
+# feature flag exists to warn about. If you ever find yourself wanting it,
+# add a `create_*` instruction instead.
+anchor-lang = { version = "0.32.1", features = ["event-cpi"] }
+anchor-spl = "0.32.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
