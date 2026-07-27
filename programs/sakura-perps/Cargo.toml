@@ -34,8 +34,8 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 # killed the predecessor program and the re-initialization attack surface the
 # feature flag exists to warn about. If you ever find yourself wanting it,
 # add a `create_*` instruction instead.
-anchor-lang = { version = "0.32.1", features = ["event-cpi"] }
-anchor-spl = "0.32.1"
+anchor-lang = { version = "1.1.2", features = ["event-cpi"] }
+anchor-spl = "1.1.2"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

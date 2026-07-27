@@ -3,8 +3,8 @@
 # self-pinning for anyone who clones. The CLI version MUST equal the anchor-lang
 # version in Cargo.toml — if they drift, account discriminators and the generated
 # IDL diverge from what the deployed program actually expects.
-anchor_version = "0.32.1"
-solana_version = "3.0.14"
+anchor_version = "1.1.2"
+solana_version = "4.1.2"
 
 [features]
 resolution = true

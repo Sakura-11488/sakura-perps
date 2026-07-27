@@ -65,12 +65,25 @@ Versions must match. If yours differ, expect failure.
 
 | Component | Version |
 |---|---|
-| Anchor CLI | 0.32.1 |
-| `anchor-lang` / `anchor-spl` | 0.32.1 |
-| Agave CLI | 3.0.14 |
-| Host Rust | 1.88.0 |
-| SBF Rust | 1.84.1-sbpf-solana-v1.51 |
+| Anchor CLI | 1.1.2 |
+| `anchor-lang` / `anchor-spl` | 1.1.2 |
+| Agave CLI | 4.1.2 |
+| Host Rust | 1.89.0 |
+| SBF platform-tools | v1.54 (bundled with Agave 4.1.2) |
 | Node | 22 |
+
+These versions are not arbitrary — they are the only combination that works, and
+finding it cost real time:
+
+- Anchor 1.1.2 requires Rust **1.89**, via its `wincode` dependency.
+- Several crates in `anchor-spl`'s transitive tree now require **edition 2024**,
+  which Rust stabilised in 1.85. Older platform-tools ship Rust 1.84 and die with
+  ``feature `edition2024` is required`` before compiling a line of your code.
+- Agave 4.1.2 bundles platform-tools **v1.54**, whose Rust is 1.89. Older Agave
+  bundles v1.51 and does not work with current Anchor.
+- Installing v1.54 *alongside* an older Agave does not help: `anchor build` does
+  not reach for it, and passing `--tools-version` through `anchor build --` is
+  rejected by the IDL builder *after* the program has already compiled.
 
 The Anchor CLI version **must equal** `anchor-lang`. If they drift, account
 discriminators and the generated IDL diverge from what the deployed program
@@ -80,7 +93,7 @@ The host toolchain and the SBF toolchain are **independent**. `rust-toolchain.to
 pins the host compiler for `cargo test`, clippy and IDL generation.
 `cargo-build-sbf` ships its own SBF toolchain and ignores that file entirely.
 
-### If `anchor build` fails with ``no such command: `+1.84.1-sbpf-solana-v1.51` ``
+### If `anchor build` fails with ``no such command: `+<toolchain>` ``
 
 Your `cargo` is not the rustup shim. `cargo-build-sbf` invokes
 `cargo +<toolchain> build`, and the `+toolchain` syntax is a rustup feature — a

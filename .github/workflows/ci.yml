@@ -28,7 +28,7 @@ env:
   # programs/sakura-perps/Cargo.toml. The Anchor CLI version in particular must
   # equal anchor-lang, or discriminators and the generated IDL diverge from what
   # the deployed program expects.
-  RUST_TOOLCHAIN: "1.88.0"
+  RUST_TOOLCHAIN: "1.89.0"
   # Agave 3.0.14 bundled platform-tools v1.51, whose SBF Rust is 1.84.1 — older
   # than the 1.85 that stabilised edition 2024. Several crates in anchor-spl's
   # transitive tree now require edition 2024, so a v1.51 build dies with
@@ -39,7 +39,7 @@ env:
   # IDL builder. Agave 4.1.2 bundles a current platform-tools by default, which
   # fixes it at the source rather than working around it.
   SOLANA_VERSION: "4.1.2"
-  ANCHOR_VERSION: "0.32.1"
+  ANCHOR_VERSION: "1.1.2"
 
 jobs:
   lint:

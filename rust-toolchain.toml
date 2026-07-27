@@ -9,6 +9,6 @@
 # silently download on first build, and a failed download surfaces as a baffling
 # unrelated error.
 [toolchain]
-channel = "1.88.0"
+channel = "1.89.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
