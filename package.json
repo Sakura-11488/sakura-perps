@@ -1,0 +1,24 @@
+{
+  "name": "sakura-perps",
+  "version": "0.1.0",
+  "description": "Permissionless oracle-and-pool perpetual futures on Solana",
+  "license": "BUSL-1.1",
+  "private": true,
+  "scripts": {
+    "lint": "prettier --check 'tests/**/*.ts'",
+    "lint:fix": "prettier --write 'tests/**/*.ts'"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.5",
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "chai": "^4.4.1",
+    "mocha": "^10.3.0",
+    "prettier": "^3.2.5",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.4.0"
+  }
+}

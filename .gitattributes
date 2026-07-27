@@ -1,0 +1,6 @@
+# Development happens on Windows; CI runs on Linux. Without this, CRLF sneaks
+# into shell scripts and they fail in CI with no useful error.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.so  binary

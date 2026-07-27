@@ -1,0 +1,14 @@
+# Pin the HOST toolchain — used for `cargo test`, clippy, rustfmt and IDL build.
+#
+# This is NOT the toolchain that compiles the on-chain program. `cargo-build-sbf`
+# ships its own (currently 1.84.1-sbpf-solana-v1.51, bundled with Agave) and
+# ignores this file entirely. The two are independent; pinning them as if they
+# were one is what produced the predecessor repo's contradictory CI.
+#
+# Pin what is actually installed. Naming a channel that is absent makes rustup
+# silently download on first build, and a failed download surfaces as a baffling
+# unrelated error.
+[toolchain]
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

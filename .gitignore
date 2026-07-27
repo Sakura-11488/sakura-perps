@@ -1,0 +1,26 @@
+# Build output
+target/
+.anchor/
+dist/
+node_modules/
+test-ledger/
+**/*.rs.bk
+.yarn/
+.DS_Store
+
+# Secrets — never, under any circumstance.
+# The predecessor repo had no .env rule at all, while its own crank bot told
+# developers to put a raw Solana secret key into .env. Public repo, waiting
+# incident.
+.env
+.env.*
+!.env.example
+
+# Keypairs. `target/` already covers target/deploy/*-keypair.json, but name
+# them explicitly so a stray copy anywhere in the tree is also ignored.
+*keypair*.json
+*-keypair.json
+deploy-keypair.json
+id.json
+keys/
+*.pem
