@@ -21,6 +21,9 @@ path = "src/lib.rs"
 # they are genuinely different types -- the first attempt failed with
 # "the trait bound solana_sdk::solana_clock::Clock: GetSysvar is not satisfied".
 litesvm = "0.15"
+# Mint and token-account builders. Pinned to the same 0.15 line as litesvm, and
+# it depends on the same solana-address ~2.6.1, so no second type family.
+litesvm-token = "0.15"
 solana-address = "2.6"
 solana-account = "4.3"
 solana-clock = "3.1"
@@ -29,6 +32,8 @@ solana-signer = "3.0"
 solana-transaction = "4.1"
 solana-instruction = "3.4"
 solana-transaction-error = "3.3"
+solana-program-pack = "3.1"
+spl-token = "8"
 anchor-lang = "1.1.2"
 pyth-solana-receiver-sdk = "2.0.0"
 sakura-perps = { path = "../../programs/sakura-perps", features = ["no-entrypoint"] }

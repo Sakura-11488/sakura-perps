@@ -197,6 +197,51 @@ pub mod sakura_perps {
     pub fn lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Result<()> {
         pool::handle_lp_withdraw(ctx, min_amount_out)
     }
+
+    /// Sets the pause bitfield.
+    ///
+    /// The exchange is created with everything paused, which until now made it
+    /// permanently inert — there was no instruction that could lift it. Writing
+    /// the vault tests is what surfaced that: the first deposit any test tried
+    /// failed with `DepositsPaused` and there was nothing to do about it.
+    ///
+    /// Admin-only. A later milestone should let a keeper *tighten* flags without
+    /// being able to loosen them, so an automated circuit breaker can halt
+    /// trading without also being able to restart it.
+    pub fn set_pause_flags(ctx: Context<SetPauseFlags>, flags: u64) -> Result<()> {
+        require!(flags <= PauseFlags::ALL, PerpsError::InvalidPauseFlags);
+
+        let exchange = &mut ctx.accounts.exchange;
+        let previous = exchange.paused_flags;
+        exchange.paused_flags = flags;
+
+        emit!(PauseFlagsChanged {
+            exchange: exchange.key(),
+            previous,
+            current: flags,
+        });
+
+        Ok(())
+    }
+}
+
+/// Accounts for [`sakura_perps::set_pause_flags`].
+#[derive(Accounts)]
+pub struct SetPauseFlags<'info> {
+    #[account(address = exchange.admin @ PerpsError::NotAdmin)]
+    pub admin: Signer<'info>,
+
+    #[account(mut, seeds = [b"exchange"], bump = exchange.bump)]
+    pub exchange: Box<Account<'info, Exchange>>,
+}
+
+/// Emitted whenever the pause bitfield changes, so the transition is auditable
+/// from logs rather than only inferable from account diffs.
+#[event]
+pub struct PauseFlagsChanged {
+    pub exchange: Pubkey,
+    pub previous: u64,
+    pub current: u64,
 }
 
 /// Arguments to [`sakura_perps::probe_oracle`].
@@ -421,4 +466,6 @@ pub enum PerpsError {
     WrongTokenProgram,
     #[msg("Vault balance is below the pool's recorded liabilities.")]
     VaultInsolvent,
+    #[msg("Pause bitfield contains bits that are not defined.")]
+    InvalidPauseFlags,
 }
