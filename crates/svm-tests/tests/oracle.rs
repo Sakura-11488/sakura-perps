@@ -358,7 +358,10 @@ fn a_price_outside_the_sanity_band_is_refused() {
         max_price: 2_000 * 10_000_000_000,
         ..Guards::default()
     };
-    expect_error(probe(account, FEED_ID, narrow), PerpsError::OraclePriceOutOfBand);
+    expect_error(
+        probe(account, FEED_ID, narrow),
+        PerpsError::OraclePriceOutOfBand,
+    );
 }
 
 /// An account for a different feed is refused. This is what stops a price for

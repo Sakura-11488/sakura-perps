@@ -102,11 +102,31 @@ pub struct OracleGuards {
 impl OracleGuards {
     /// Guards suitable for opening a position: tight.
     ///
-    /// Thirty seconds and 100 bps of confidence. A trade that cannot be priced
-    /// confidently simply does not happen.
+    /// A trade that cannot be priced confidently simply does not happen.
+    ///
+    /// # Where these numbers came from
+    ///
+    /// `max_age_seconds` was 30 until it was measured against the live
+    /// sponsored Pyth SOL/USD feed on devnet
+    /// (`7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE`). Six samples put the
+    /// publish age between **16 and 24 seconds** — a margin of six seconds
+    /// against a 30-second limit, which any ordinary hiccup would eat. A guard
+    /// that rejects healthy prices is not a safe guard: it stops trading for no
+    /// reason, and it teaches whoever operates the market to widen limits under
+    /// pressure rather than deliberately.
+    ///
+    /// Sixty seconds is Pyth's own conventional `maximum_age` in their examples,
+    /// and it holds roughly a 2.5× margin over what that feed actually does.
+    /// Confidence is left at 100 bps, which the same samples cleared easily at
+    /// 4.6–6.5 bps.
+    ///
+    /// These are defaults for a newly created market, not a ceiling. A mainnet
+    /// market on a feed with a faster observed cadence should tighten them, and
+    /// the fact that they live in market state rather than in a `const` is
+    /// precisely so that it can.
     pub fn for_trading(min_price: u128, max_price: u128, expected_exponent: i32) -> Self {
         Self {
-            max_age_seconds: 30,
+            max_age_seconds: 60,
             max_age_slots: 150,
             max_future_skew_seconds: 5,
             max_confidence_bps: 100,
@@ -128,7 +148,7 @@ impl OracleGuards {
     /// same structural checks apply, only the thresholds differ.
     pub fn for_liquidation(min_price: u128, max_price: u128, expected_exponent: i32) -> Self {
         Self {
-            max_age_seconds: 60,
+            max_age_seconds: 120,
             max_age_slots: 300,
             max_future_skew_seconds: 5,
             max_confidence_bps: 500,
@@ -364,11 +384,19 @@ mod tests {
 
     #[test]
     fn a_stale_price_is_rejected() {
-        // Published 31 seconds ago against a 30 second limit.
+        // Published 61 seconds ago against the 60 second trading limit. This
+        // test previously encoded 31-against-30 and had to be updated when the
+        // limit was widened after measuring the live devnet feed — which is the
+        // correct outcome: a threshold change should break the test that pins
+        // the threshold, not slip through unnoticed.
         assert_eq!(
-            validate_price(fresh(12_345_000_000, 0), &guards(), 1_000_031, 520),
+            validate_price(fresh(12_345_000_000, 0), &guards(), 1_000_061, 520),
             Err(RiskError::StalePrice)
         );
+
+        // And one second inside the limit is still accepted, so the boundary is
+        // pinned from both sides rather than only from the rejecting one.
+        assert!(validate_price(fresh(12_345_000_000, 0), &guards(), 1_000_059, 520).is_ok());
     }
 
     #[test]
