@@ -39,6 +39,13 @@ use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
 use sakura_perps_risk::oracle::OracleGuards;
 
 pub mod oracle;
+pub mod pool;
+
+// Glob re-export, not a narrow import. `#[program]` generates references to
+// `crate::__client_accounts_*` for every Accounts struct, so those macro-made
+// modules have to be visible at the crate root even though the structs
+// themselves live in `pool`.
+pub use crate::pool::*;
 
 declare_id!("5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y");
 
@@ -160,6 +167,35 @@ pub mod sakura_perps {
         });
 
         Ok(())
+    }
+
+    /// Creates the shared liquidity pool, its collateral vault, and the LP share
+    /// mint. Admin-only, and callable once — the PDA seeds make a second call
+    /// fail at account creation rather than needing an explicit guard.
+    pub fn initialize_pool(
+        ctx: Context<InitializePool>,
+        params: InitializePoolParams,
+    ) -> Result<()> {
+        pool::handle_initialize_pool(ctx, params)
+    }
+
+    /// Deposits collateral and mints LP shares.
+    ///
+    /// `min_shares_out` is mandatory rather than advisory: without it a
+    /// depositor has no defence against the share price moving between
+    /// simulation and execution.
+    pub fn lp_deposit(ctx: Context<LpDeposit>, amount: u64, min_shares_out: u64) -> Result<()> {
+        pool::handle_lp_deposit(ctx, amount, min_shares_out)
+    }
+
+    /// Escrows shares and starts the withdrawal delay.
+    pub fn request_withdraw(ctx: Context<RequestWithdraw>, shares: u64) -> Result<()> {
+        pool::handle_request_withdraw(ctx, shares)
+    }
+
+    /// Burns escrowed shares and returns collateral, once the delay has elapsed.
+    pub fn lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Result<()> {
+        pool::handle_lp_withdraw(ctx, min_amount_out)
     }
 }
 
@@ -347,4 +383,42 @@ pub enum PerpsError {
     EmptyPool,
     #[msg("Initial margin must exceed maintenance margin plus liquidation fee.")]
     InvalidMarginParameters,
+
+    // ── Pool and vault ──────────────────────────────────────────────────────
+    #[msg("Only the exchange admin may do this.")]
+    NotAdmin,
+    #[msg("Deposit or withdraw fee exceeds the permitted maximum.")]
+    FlowFeeTooHigh,
+    #[msg("Withdrawal delay exceeds the permitted maximum.")]
+    WithdrawDelayTooLong,
+    #[msg("Liquidity deposits are paused.")]
+    DepositsPaused,
+    #[msg("Liquidity withdrawals are paused.")]
+    WithdrawalsPaused,
+    #[msg("Amount must be greater than zero.")]
+    ZeroAmount,
+    #[msg("Deposit would mint zero shares.")]
+    ZeroSharesMinted,
+    #[msg("Result was worse than the caller's stated minimum.")]
+    SlippageExceeded,
+    #[msg("Pool has reached its deposit cap.")]
+    PoolCapReached,
+    #[msg("Withdrawal exceeds liquidity providers' equity.")]
+    InsufficientPoolEquity,
+    #[msg("Withdrawal would push utilisation past the configured ceiling.")]
+    UtilizationTooHigh,
+    #[msg("Withdrawal delay has not elapsed.")]
+    WithdrawTooSoon,
+    #[msg("Withdraw request belongs to a different owner.")]
+    NotRequestOwner,
+    #[msg("Token account is not owned by the expected authority.")]
+    NotTokenOwner,
+    #[msg("Mint is not this exchange's collateral mint.")]
+    WrongCollateralMint,
+    #[msg("Mint is not this pool's share mint.")]
+    WrongShareMint,
+    #[msg("Token program does not match the one pinned at initialization.")]
+    WrongTokenProgram,
+    #[msg("Vault balance is below the pool's recorded liabilities.")]
+    VaultInsolvent,
 }
