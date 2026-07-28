@@ -8,6 +8,133 @@
   },
   "instructions": [
     {
+      "name": "close_stale_escrow",
+      "docs": [
+        "Closes an orphaned withdraw escrow, returning its rent to the owner.",
+        "",
+        "Recovery for accounts stranded by the version of `lp_withdraw` that",
+        "closed the request but not its escrow, which left the owner unable to",
+        "ever request a withdrawal again. Refuses to touch an escrow that still",
+        "holds shares, or one whose request is still open."
+      ],
+      "discriminator": [
+        206,
+        8,
+        171,
+        68,
+        253,
+        194,
+        209,
+        21
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "Receives the reclaimed rent, and is the only signer able to reach this",
+            "escrow — the seeds below bind the account to them."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdraw_request",
+          "docs": [
+            "Checked as raw account info because the whole point is that it must NOT",
+            "exist. A typed `Account` would fail deserialization before the handler",
+            "could give a meaningful error.",
+            "the same seeds `request_withdraw` uses, so it cannot point elsewhere."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  95,
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_share_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "docs": [
+            "Unconstrained here, exactly as in `request_withdraw` and `lp_withdraw`:",
+            "the escrow is a typed `InterfaceAccount`, so Anchor already checks which",
+            "token program owns it, and a mismatched program fails the CPI anyway."
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "initialize_exchange",
       "docs": [
         "Creates the singleton [`Exchange`] configuration account.",
@@ -944,6 +1071,19 @@
       ]
     },
     {
+      "name": "StaleEscrowClosed",
+      "discriminator": [
+        48,
+        206,
+        147,
+        198,
+        161,
+        151,
+        134,
+        113
+      ]
+    },
+    {
       "name": "WithdrawRequested",
       "discriminator": [
         114,
@@ -1120,11 +1260,21 @@
     },
     {
       "code": 6032,
+      "name": "EscrowNotEmpty",
+      "msg": "Withdraw escrow still holds shares; complete the withdrawal instead."
+    },
+    {
+      "code": 6033,
+      "name": "WithdrawRequestStillOpen",
+      "msg": "A withdraw request is still open; its escrow is not stale."
+    },
+    {
+      "code": 6034,
       "name": "VaultInsolvent",
       "msg": "Vault balance is below the pool's recorded liabilities."
     },
     {
-      "code": 6033,
+      "code": 6035,
       "name": "InvalidPauseFlags",
       "msg": "Pause bitfield contains bits that are not defined."
     }
@@ -1822,6 +1972,22 @@
               "The exponent the feed is expected to publish."
             ],
             "type": "i32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StaleEscrowClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
           }
         ]
       }

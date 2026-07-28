@@ -156,6 +156,7 @@ Source-to-bytecode traceability. Every deploy gets a row.
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `569798fe…0e324d47` | `devnet-v0.2.0` | 2026-07-27 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `7c833439…310bbab3` | `devnet-v0.3.0` | 2026-07-28 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `5d879e58…07e61d2d` | `devnet-v0.4.0` | 2026-07-28 | `5JSAncTb…dKP` |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `6abbbf6d…fdba2a87` | `devnet-v0.5.0` | 2026-07-28 | `5JSAncTb…dKP` |
 
 ### Pool round-trip, verified on devnet
 
@@ -194,11 +195,33 @@ round-trip found it on its second run. `a_provider_can_withdraw_twice` now cover
 it, and asserts the escrow account is actually gone between cycles rather than
 inferring it from the next call succeeding.
 
-One live casualty remains as evidence: the admin wallet
-`5JSAncTb…dKP` still has a stranded escrow from a pre-fix run and can never
-withdraw from this pool again. Nothing in the program can close an escrow except
-`lp_withdraw`, which cannot be reached without `request_withdraw` succeeding
-first. Worth a recovery instruction before mainnet.
+### `close_stale_escrow`, and the recovery it performed
+
+`lp_withdraw` closes the escrow now, so no new orphans appear — but the ones
+already on chain needed a way out, because nothing in the program could close an
+escrow except `lp_withdraw`, unreachable without `request_withdraw` succeeding
+first. `close_stale_escrow` is that path. Owner-signed, and narrow by design: the
+escrow is addressed by PDA seeds so an owner can only reach their own, and it
+refuses both a non-empty escrow (those shares belong to a live request) and one
+whose `WithdrawRequest` is still open (closing it would strand that request).
+Not gated on `PauseFlags` — a recovery path a pause can disable is not one.
+
+Verified against the real casualty rather than a fixture. The admin wallet
+`5JSAncTb…dKP` had been unable to withdraw since the pre-fix run:
+
+| Step | Result |
+|---|---|
+| `close_stale_escrow` on `GesUd6xF…WtED` | escrow closed, 0.002034 SOL rent returned |
+| `request_withdraw` 15,000,000 shares | **succeeded** — the call that had been failing |
+| `lp_withdraw` | 15 USDC returned, 0 shares left |
+
+`tests/devnet-close-stale-escrow.ts` and `tests/devnet-withdraw-position.ts`
+reproduce both halves.
+
+**Still missing: `cancel_withdraw`.** Request a withdrawal that then cannot
+complete — utilisation rising above `max_utilization_bps` is enough — and the
+shares sit in escrow with no way to take them back. `close_stale_escrow` does not
+help, correctly: the escrow is non-empty and the request is live.
 
 ### Upgrading needs `program extend` first
 
