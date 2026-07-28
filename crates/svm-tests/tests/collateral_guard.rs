@@ -162,7 +162,9 @@ fn freezable_collateral_is_refused_by_default() {
         PerpsError::CollateralMintIsFreezable,
     );
     assert!(
-        env.svm.get_account(&env.exchange).is_none_or(|a| a.data.is_empty()),
+        env.svm
+            .get_account(&env.exchange)
+            .is_none_or(|a| a.data.is_empty()),
         "a refused initialize must not leave an exchange behind",
     );
 }
