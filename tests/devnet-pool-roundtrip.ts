@@ -28,7 +28,17 @@ import {
 import fs from 'fs';
 import type { SakuraPerps } from '../target/types/sakura_perps';
 
-const USDC_DEVNET = new PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr');
+/**
+ * Circle's USDC on Solana devnet — the one faucet.circle.com actually dispenses.
+ *
+ * NOT `Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr`, which the plan named. That
+ * is a legacy community "USDC-Dev" token whose **mint authority is the mint
+ * address itself**, so no keypair can sign a mint instruction and its supply is
+ * permanently fixed — there is no faucet for it and there cannot be one. Caught
+ * before `initialize_exchange` ran, which matters because that call pins the
+ * collateral mint for the life of the program id.
+ */
+const USDC_DEVNET = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 const PROGRAM_ID = new PublicKey('5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y');
 /** 10 USDC, six decimals. Small enough to be cheap, large enough that share
  *  maths is not operating on dust. */

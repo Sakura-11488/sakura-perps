@@ -124,13 +124,27 @@ anchor test
 |---|---|
 | Cluster | devnet |
 | Program id | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` |
-| Collateral (planned) | USDC-devnet `Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr` |
+| Collateral (planned) | Circle USDC-devnet `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` |
 | Oracle receiver | Pyth `rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ` |
 | SOL/USD feed | `7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE` |
 
 Note that USDC-devnet is owned by the **legacy** SPL Token program while SAKURA
 is Token-2022. The program uses `anchor_spl::token_interface` throughout so it
 can accept either, and pins whichever it was initialized with.
+
+The plan previously named `Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr`. That is
+a legacy community "USDC-Dev" token whose **mint authority is the mint address
+itself**, so nothing can ever mint it and no faucet for it exists or can exist.
+Circle's devnet USDC is `4zMMC9sr…`, which is what faucet.circle.com dispenses.
+
+> **Unresolved: `CollateralMintIsFreezable` blocks real USDC.**
+> `initialize_exchange` rejects any collateral mint carrying a freeze authority
+> (`lib.rs:90`). Verified on devnet against the deployed `devnet-v0.3.0`: it
+> refuses Circle's devnet USDC, and mainnet USDC
+> (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) has freeze authority
+> `7dGbd2QZ…` too. So the program as written can never take USDC on either
+> cluster, which contradicts the collateral decision above. Needs resolving
+> before the pool can be exercised end to end.
 
 ## Deployments
 
