@@ -102,7 +102,14 @@ async function main() {
   if (!(await exists(exchange))) {
     console.log('\ninitialize_exchange …');
     const sig = await program.methods
-      .initializeExchange({ feeRecipient: admin, protocolFeeShareBps: 1_000 })
+      .initializeExchange({
+        feeRecipient: admin,
+        protocolFeeShareBps: 1_000,
+        // Circle can freeze USDC accounts, including this pool's vault. Accepted
+        // deliberately: refusing every freezable mint refuses USDC itself, and
+        // the authority is recorded on the Exchange for anyone auditing it.
+        allowFreezableCollateral: true,
+      })
       .accounts({ admin, collateralMint: USDC_DEVNET })
       .rpc();
     console.log('  sig', sig);

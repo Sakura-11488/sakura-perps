@@ -54,6 +54,7 @@ describe("initialize_exchange", () => {
       .initializeExchange({
         feeRecipient,
         protocolFeeShareBps: PROTOCOL_FEE_SHARE_BPS,
+        allowFreezableCollateral: false,
       })
       .accounts({
         admin: admin.publicKey,
@@ -93,7 +94,7 @@ describe("initialize_exchange", () => {
   it("cannot be initialized twice", async () => {
     try {
       await program.methods
-        .initializeExchange({ feeRecipient, protocolFeeShareBps: PROTOCOL_FEE_SHARE_BPS })
+        .initializeExchange({ feeRecipient, protocolFeeShareBps: PROTOCOL_FEE_SHARE_BPS, allowFreezableCollateral: false })
         .accounts({
           admin: admin.publicKey,
           collateralMint,

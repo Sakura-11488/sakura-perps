@@ -86,9 +86,13 @@ pub mod sakura_perps {
 
         // A freezable collateral mint means its freeze authority can brick both
         // withdrawals and liquidations at will. That is not a risk to accept on
-        // behalf of liquidity providers.
+        // behalf of liquidity providers by accident — but it is one this venue
+        // has to accept on purpose, because every real USD stablecoin carries a
+        // freeze authority and refusing all of them refuses USDC itself. So the
+        // default stays closed and the admin opts in explicitly, once.
+        let freeze_authority: Option<Pubkey> = collateral_mint.freeze_authority.into();
         require!(
-            collateral_mint.freeze_authority.is_none(),
+            freeze_authority.is_none() || params.allow_freezable_collateral,
             PerpsError::CollateralMintIsFreezable
         );
 
@@ -104,6 +108,10 @@ pub mod sakura_perps {
         // mint — the value later instructions must match against.
         exchange.collateral_token_program = *collateral_mint.to_account_info().owner;
         exchange.collateral_decimals = collateral_mint.decimals;
+        // Recorded, not merely permitted: anyone auditing this exchange can see
+        // which key can freeze its collateral without having to go and read the
+        // mint. `default()` means none, matching the reserved-field convention.
+        exchange.collateral_freeze_authority = freeze_authority.unwrap_or_default();
         exchange.protocol_fee_share_bps = params.protocol_fee_share_bps;
         // Everything starts paused. An exchange that is live the instant it is
         // created is an exchange nobody had a chance to inspect first.
@@ -306,6 +314,19 @@ pub struct InitializeExchangeParams {
     pub fee_recipient: Pubkey,
     /// Protocol's cut of trading fees in bps; the remainder accrues to LPs.
     pub protocol_fee_share_bps: u16,
+    /// Accept a collateral mint that carries a freeze authority.
+    ///
+    /// Defaults closed and has to be set deliberately. Every real USD stablecoin
+    /// has a freeze authority — mainnet USDC's is `7dGbd2QZ…` — so a blanket
+    /// refusal means the exchange can never hold the collateral it was designed
+    /// around. Refusing by default is still right: a freezable mint nobody
+    /// examined is how a venue ends up with an issuer able to brick withdrawals,
+    /// and the admin picks this mint exactly once, permanently.
+    ///
+    /// Setting it asserts the issuer's freeze power was weighed and accepted.
+    /// The authority is recorded on the [`Exchange`] so that decision is
+    /// auditable on-chain rather than living in a deploy script.
+    pub allow_freezable_collateral: bool,
 }
 
 /// Bitfield of independently pausable actions.
@@ -345,6 +366,10 @@ pub struct Exchange {
     /// Cached from the mint. Read at runtime, never assumed — a predecessor
     /// program assumed 9 decimals for a 6-decimal mint and was wrong by 1000x.
     pub collateral_decimals: u8,
+    /// Freeze authority of `collateral_mint` at initialization, or the default
+    /// pubkey when it had none. Stored so the one party able to brick this
+    /// exchange's withdrawals is visible on-chain rather than implied.
+    pub collateral_freeze_authority: Pubkey,
     /// Bitfield of [`PauseFlags`].
     pub paused_flags: u64,
     /// Protocol's share of trading fees in bps; the rest goes to LPs.
@@ -353,7 +378,11 @@ pub struct Exchange {
     pub num_markets: u32,
     /// Anchor has no migration story and fields always get added. Reserve now,
     /// because growing an account later means reallocating every instance.
-    pub _reserved: [u8; 128],
+    ///
+    /// 128 originally; `collateral_freeze_authority` was taken from here rather
+    /// than appended, which is what the reserve is for — the account's size is
+    /// unchanged and no existing instance would need reallocating.
+    pub _reserved: [u8; 96],
 }
 
 #[derive(Accounts)]

@@ -187,6 +187,10 @@ impl Fixture {
                 params: InitializeExchangeParams {
                     fee_recipient: self.admin.pubkey(),
                     protocol_fee_share_bps: 1_000,
+                    // This fixture's mint has no freeze authority, so the opt-in
+                    // is not needed to pass — leaving it closed keeps the guard
+                    // under test on the default path.
+                    allow_freezable_collateral: false,
                 },
             }
             .data(),
