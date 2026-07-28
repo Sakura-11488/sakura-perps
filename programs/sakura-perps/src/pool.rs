@@ -462,6 +462,29 @@ pub fn handle_lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Resu
         ctx.accounts.collateral_mint.decimals,
     )?;
 
+    // Close the escrow token account, not just the request.
+    //
+    // `withdraw_request` carries `close = owner`, but Anchor's `close` cannot
+    // touch a token account — SPL owns it, so it takes a CPI. Without this the
+    // escrow PDA at `[b"withdraw_escrow", owner]` survives the withdrawal, and
+    // the owner's NEXT request_withdraw fails at account creation ("already in
+    // use") with no instruction anywhere able to clear it: a liquidity provider
+    // could withdraw exactly once, ever, and the remainder of their position
+    // would be stranded. Found by running the devnet round-trip a second time —
+    // the SVM suite only ever exercised one withdrawal cycle.
+    //
+    // Safe here because the burn above left the escrow empty; `close_account`
+    // refuses an account still holding tokens.
+    token_interface::close_account(CpiContext::new_with_signer(
+        ctx.accounts.token_program.key(),
+        token_interface::CloseAccount {
+            account: ctx.accounts.escrow_share_account.to_account_info(),
+            destination: ctx.accounts.owner.to_account_info(),
+            authority: pool.to_account_info(),
+        },
+        signer,
+    ))?;
+
     // The fee stays in the vault and becomes protocol revenue; only `net` left.
     pool.quote_deposited = quote_deposited_after;
     pool.pending_protocol_fees = pool

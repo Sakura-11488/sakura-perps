@@ -423,6 +423,52 @@ fn a_deposit_and_withdrawal_round_trip_returns_no_more_than_it_took() {
     );
 }
 
+/// A provider can withdraw more than once.
+///
+/// `request_withdraw` creates two accounts and `lp_withdraw` closed only one of
+/// them, leaving the escrow token account at `[b"withdraw_escrow", owner]`
+/// behind. The second request then failed at account creation — "already in
+/// use" — and no instruction in the program could clear it, so a provider got
+/// exactly one withdrawal and the remainder of their position was stranded.
+///
+/// Every existing test stopped after a single cycle, which is exactly why the
+/// suite stayed green while that shipped. The devnet round-trip found it on its
+/// second run.
+#[test]
+fn a_provider_can_withdraw_twice() {
+    let mut fixture = Fixture::new(default_params());
+    fixture.deposit(1_000 * ONE, 1).expect("deposit");
+
+    // First cycle: take out half.
+    let half = fixture.token_balance(fixture.lp_share_account) / 2;
+    request_withdraw(&mut fixture, half).expect("first request");
+    fixture.advance(61, 2);
+    lp_withdraw(&mut fixture, 1).expect("first withdraw");
+
+    // The escrow must be gone, or the next request cannot allocate it.
+    let escrow = pda(&[b"withdraw_escrow", fixture.lp.pubkey().as_ref()]);
+    assert!(
+        fixture
+            .svm
+            .get_account(&escrow)
+            .is_none_or(|a| a.data.is_empty()),
+        "lp_withdraw must close the escrow token account, not just the request",
+    );
+
+    // Second cycle: the rest. This is the call that used to fail outright.
+    let rest = fixture.token_balance(fixture.lp_share_account);
+    request_withdraw(&mut fixture, rest).expect("second request must not collide with the first");
+    fixture.advance(61, 2);
+    lp_withdraw(&mut fixture, 1).expect("second withdraw");
+
+    let pool = fixture.pool_state();
+    assert_eq!(
+        pool.total_shares,
+        sakura_perps_risk::pool::MINIMUM_LIQUIDITY as u64,
+        "only the permanently locked minimum should remain",
+    );
+}
+
 /// Withdrawal before the delay has elapsed is refused.
 #[test]
 fn a_withdrawal_before_the_delay_is_refused() {

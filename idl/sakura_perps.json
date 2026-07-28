@@ -1187,6 +1187,15 @@
             "type": "u8"
           },
           {
+            "name": "collateral_freeze_authority",
+            "docs": [
+              "Freeze authority of `collateral_mint` at initialization, or the default",
+              "pubkey when it had none. Stored so the one party able to brick this",
+              "exchange's withdrawals is visible on-chain rather than implied."
+            ],
+            "type": "pubkey"
+          },
+          {
             "name": "paused_flags",
             "docs": [
               "Bitfield of [`PauseFlags`]."
@@ -1211,12 +1220,16 @@
             "name": "_reserved",
             "docs": [
               "Anchor has no migration story and fields always get added. Reserve now,",
-              "because growing an account later means reallocating every instance."
+              "because growing an account later means reallocating every instance.",
+              "",
+              "128 originally; `collateral_freeze_authority` was taken from here rather",
+              "than appended, which is what the reserve is for — the account's size is",
+              "unchanged and no existing instance would need reallocating."
             ],
             "type": {
               "array": [
                 "u8",
-                128
+                96
               ]
             }
           }
@@ -1272,6 +1285,24 @@
               "Protocol's cut of trading fees in bps; the remainder accrues to LPs."
             ],
             "type": "u16"
+          },
+          {
+            "name": "allow_freezable_collateral",
+            "docs": [
+              "Accept a collateral mint that carries a freeze authority.",
+              "",
+              "Defaults closed and has to be set deliberately. Every real USD stablecoin",
+              "has a freeze authority — mainnet USDC's is `7dGbd2QZ…` — so a blanket",
+              "refusal means the exchange can never hold the collateral it was designed",
+              "around. Refusing by default is still right: a freezable mint nobody",
+              "examined is how a venue ends up with an issuer able to brick withdrawals,",
+              "and the admin picks this mint exactly once, permanently.",
+              "",
+              "Setting it asserts the issuer's freeze power was weighed and accepted.",
+              "The authority is recorded on the [`Exchange`] so that decision is",
+              "auditable on-chain rather than living in a deploy script."
+            ],
+            "type": "bool"
           }
         ]
       }
