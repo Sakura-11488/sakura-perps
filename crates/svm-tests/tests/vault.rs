@@ -658,3 +658,124 @@ fn lp_withdraw(fixture: &mut Fixture, min_amount_out: u64) -> Result<(), Transac
     let lp = fixture.lp.insecure_clone();
     fixture.send(instruction, &[&lp])
 }
+
+fn close_stale_escrow(fixture: &mut Fixture) -> Result<(), TransactionError> {
+    let owner = fixture.lp.pubkey();
+    let instruction = Instruction {
+        program_id: sakura_perps::ID,
+        accounts: sakura_perps::accounts::CloseStaleEscrow {
+            owner,
+            pool: fixture.pool,
+            withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
+            escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
+            token_program: spl_token_id(),
+        }
+        .to_account_metas(None),
+        data: sakura_perps::instruction::CloseStaleEscrow {}.data(),
+    };
+    let lp = fixture.lp.insecure_clone();
+    fixture.send(instruction, &[&lp])
+}
+
+/// An escrow still holding shares is not stale, and must not be discarded.
+///
+/// This is the case that would burn a provider's claim: the shares are in
+/// escrow against a live request, and the way out is `lp_withdraw`, not here.
+#[test]
+fn a_funded_escrow_is_not_closeable() {
+    let mut fixture = Fixture::new(default_params());
+    fixture.deposit(1_000 * ONE, 1).expect("deposit");
+    let shares = fixture.token_balance(fixture.lp_share_account);
+    request_withdraw(&mut fixture, shares).expect("request");
+
+    expect_error(close_stale_escrow(&mut fixture), PerpsError::EscrowNotEmpty);
+}
+
+/// Nor is one whose request is still open, even after the shares are gone.
+///
+/// Reachable only in an inconsistent state, but the ordering matters: closing
+/// the escrow out from under a live request would make that request permanently
+/// unexecutable, which is the exact failure this instruction exists to undo.
+#[test]
+fn an_open_request_blocks_closing_its_escrow() {
+    let mut fixture = Fixture::new(default_params());
+    fixture.deposit(1_000 * ONE, 1).expect("deposit");
+    let shares = fixture.token_balance(fixture.lp_share_account);
+    request_withdraw(&mut fixture, shares).expect("request");
+
+    // Empty the escrow without touching the request, so only the second guard
+    // can be the one that fires.
+    let escrow = pda(&[b"withdraw_escrow", fixture.lp.pubkey().as_ref()]);
+    let mut account = fixture.svm.get_account(&escrow).expect("escrow exists");
+    account.data[64..72].copy_from_slice(&0u64.to_le_bytes()); // SPL token amount
+    fixture
+        .svm
+        .set_account(escrow, account)
+        .expect("zero the escrow");
+
+    expect_error(
+        close_stale_escrow(&mut fixture),
+        PerpsError::WithdrawRequestStillOpen,
+    );
+}
+
+/// The case this exists for: an escrow left behind with no request, which the
+/// pre-fix `lp_withdraw` produced on every completed withdrawal.
+#[test]
+fn an_orphaned_escrow_can_be_closed_by_its_owner() {
+    let mut fixture = Fixture::new(default_params());
+    fixture.deposit(1_000 * ONE, 1).expect("deposit");
+    let shares = fixture.token_balance(fixture.lp_share_account);
+    request_withdraw(&mut fixture, shares).expect("request");
+    fixture.advance(61, 2);
+    lp_withdraw(&mut fixture, 1).expect("withdraw");
+
+    // lp_withdraw closes the escrow itself now, so the orphan has to be
+    // recreated to test the recovery path: re-request, then delete the request
+    // alone, leaving exactly the pre-fix shape.
+    fixture.svm.expire_blockhash();
+    let remaining = fixture.token_balance(fixture.lp_share_account);
+    if remaining > 0 {
+        request_withdraw(&mut fixture, remaining).expect("second request");
+    }
+    let escrow = pda(&[b"withdraw_escrow", fixture.lp.pubkey().as_ref()]);
+    let mut account = fixture.svm.get_account(&escrow).expect("escrow exists");
+    account.data[64..72].copy_from_slice(&0u64.to_le_bytes());
+    fixture
+        .svm
+        .set_account(escrow, account)
+        .expect("zero the escrow");
+    let request = pda(&[b"withdraw_request", fixture.lp.pubkey().as_ref()]);
+    fixture
+        .svm
+        .set_account(request, solana_account::Account::default())
+        .expect("orphan the escrow");
+
+    let before = fixture
+        .svm
+        .get_account(&fixture.lp.pubkey())
+        .unwrap()
+        .lamports;
+    close_stale_escrow(&mut fixture).expect("owner can reclaim an orphaned escrow");
+
+    assert!(
+        fixture
+            .svm
+            .get_account(&escrow)
+            .is_none_or(|a| a.data.is_empty()),
+        "the escrow should be gone",
+    );
+    let after = fixture
+        .svm
+        .get_account(&fixture.lp.pubkey())
+        .unwrap()
+        .lamports;
+    assert!(after > before, "rent should be returned to the owner");
+
+    // And the whole point: requesting a withdrawal is possible again.
+    fixture.svm.expire_blockhash();
+    let left = fixture.token_balance(fixture.lp_share_account);
+    if left > 0 {
+        request_withdraw(&mut fixture, left).expect("request works again after recovery");
+    }
+}

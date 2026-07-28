@@ -780,3 +780,106 @@ pub struct LiquidityWithdrawn {
     pub total_shares: u64,
     pub quote_deposited: u64,
 }
+
+/// Close an orphaned withdraw escrow, returning its rent to the owner.
+///
+/// # Why this exists
+///
+/// `request_withdraw` creates two accounts: a [`WithdrawRequest`] and an escrow
+/// token account at `[b"withdraw_escrow", owner]`. An earlier `lp_withdraw`
+/// closed only the first. The escrow survived every completed withdrawal, and
+/// because `request_withdraw` *creates* that escrow, the owner's next request
+/// failed at account creation — permanently, with nothing in the program able to
+/// clear it. A provider got exactly one withdrawal and the remainder of their
+/// position was stranded.
+///
+/// `lp_withdraw` closes the escrow now, so no new orphans are produced. This is
+/// the migration path for the ones already on chain: at the time of writing a
+/// live devnet account is in exactly this state and cannot withdraw again.
+///
+/// # Why it is safe to expose to anyone
+///
+/// It is owner-signed and refuses to do anything interesting:
+///
+/// - The escrow is addressed by PDA seeds, so an owner can only ever reach their
+///   own. There is no account to pass that points at somebody else's.
+/// - It requires the escrow to be **empty**. A non-empty escrow means shares are
+///   still held against a live request, and discarding it would burn a
+///   provider's claim; that case belongs to `lp_withdraw`, not here.
+/// - It requires **no** [`WithdrawRequest`] to exist. With one open, the escrow
+///   is load-bearing, and closing it would make that request permanently
+///   unexecutable — which is the very failure this instruction exists to undo.
+///
+/// Rent goes back to the owner, who paid it. Deliberately not gated on
+/// [`PauseFlags`]: a recovery path that a pause can disable is not a recovery
+/// path, and closing an empty account moves no value.
+pub fn handle_close_stale_escrow(ctx: Context<CloseStaleEscrow>) -> Result<()> {
+    let escrow = &ctx.accounts.escrow_share_account;
+
+    require!(escrow.amount == 0, PerpsError::EscrowNotEmpty);
+    require!(
+        ctx.accounts.withdraw_request.data_is_empty()
+            && ctx.accounts.withdraw_request.lamports() == 0,
+        PerpsError::WithdrawRequestStillOpen
+    );
+
+    let pool = &ctx.accounts.pool;
+    let pool_seeds: &[&[u8]] = &[b"pool", &[pool.bump]];
+    let signer: &[&[&[u8]]] = &[pool_seeds];
+
+    // The pool is the escrow's token authority, so only the program can close
+    // it — which is precisely why the orphan could not be cleared from outside.
+    token_interface::close_account(CpiContext::new_with_signer(
+        ctx.accounts.token_program.key(),
+        token_interface::CloseAccount {
+            account: escrow.to_account_info(),
+            destination: ctx.accounts.owner.to_account_info(),
+            authority: pool.to_account_info(),
+        },
+        signer,
+    ))?;
+
+    emit!(StaleEscrowClosed {
+        pool: pool.key(),
+        owner: ctx.accounts.owner.key(),
+    });
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct CloseStaleEscrow<'info> {
+    /// Receives the reclaimed rent, and is the only signer able to reach this
+    /// escrow — the seeds below bind the account to them.
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(seeds = [b"pool"], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    /// Checked as raw account info because the whole point is that it must NOT
+    /// exist. A typed `Account` would fail deserialization before the handler
+    /// could give a meaningful error.
+    /// CHECK: verified empty and unfunded in the handler; address is pinned by
+    /// the same seeds `request_withdraw` uses, so it cannot point elsewhere.
+    #[account(seeds = [b"withdraw_request", owner.key().as_ref()], bump)]
+    pub withdraw_request: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"withdraw_escrow", owner.key().as_ref()],
+        bump,
+    )]
+    pub escrow_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// Unconstrained here, exactly as in `request_withdraw` and `lp_withdraw`:
+    /// the escrow is a typed `InterfaceAccount`, so Anchor already checks which
+    /// token program owns it, and a mismatched program fails the CPI anyway.
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+#[event]
+pub struct StaleEscrowClosed {
+    pub pool: Pubkey,
+    pub owner: Pubkey,
+}

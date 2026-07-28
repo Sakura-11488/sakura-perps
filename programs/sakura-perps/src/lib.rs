@@ -206,6 +206,16 @@ pub mod sakura_perps {
         pool::handle_lp_withdraw(ctx, min_amount_out)
     }
 
+    /// Closes an orphaned withdraw escrow, returning its rent to the owner.
+    ///
+    /// Recovery for accounts stranded by the version of `lp_withdraw` that
+    /// closed the request but not its escrow, which left the owner unable to
+    /// ever request a withdrawal again. Refuses to touch an escrow that still
+    /// holds shares, or one whose request is still open.
+    pub fn close_stale_escrow(ctx: Context<CloseStaleEscrow>) -> Result<()> {
+        pool::handle_close_stale_escrow(ctx)
+    }
+
     /// Sets the pause bitfield.
     ///
     /// The exchange is created with everything paused, which until now made it
@@ -493,6 +503,10 @@ pub enum PerpsError {
     WrongShareMint,
     #[msg("Token program does not match the one pinned at initialization.")]
     WrongTokenProgram,
+    #[msg("Withdraw escrow still holds shares; complete the withdrawal instead.")]
+    EscrowNotEmpty,
+    #[msg("A withdraw request is still open; its escrow is not stale.")]
+    WithdrawRequestStillOpen,
     #[msg("Vault balance is below the pool's recorded liabilities.")]
     VaultInsolvent,
     #[msg("Pause bitfield contains bits that are not defined.")]
