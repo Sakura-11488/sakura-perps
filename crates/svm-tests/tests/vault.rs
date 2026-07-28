@@ -456,6 +456,11 @@ fn a_provider_can_withdraw_twice() {
     );
 
     // Second cycle: the rest. This is the call that used to fail outright.
+    //
+    // Fresh blockhash first, or the two requests are byte-identical
+    // transactions and the second is rejected as AlreadyProcessed — a
+    // deduplication artifact that would masquerade as the bug under test.
+    fixture.svm.expire_blockhash();
     let rest = fixture.token_balance(fixture.lp_share_account);
     request_withdraw(&mut fixture, rest).expect("second request must not collide with the first");
     fixture.advance(61, 2);
