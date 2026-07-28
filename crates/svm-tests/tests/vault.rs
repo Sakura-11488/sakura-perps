@@ -725,8 +725,11 @@ fn an_open_request_blocks_closing_its_escrow() {
 fn an_orphaned_escrow_can_be_closed_by_its_owner() {
     let mut fixture = Fixture::new(default_params());
     fixture.deposit(1_000 * ONE, 1).expect("deposit");
-    let shares = fixture.token_balance(fixture.lp_share_account);
-    request_withdraw(&mut fixture, shares).expect("request");
+
+    // Withdraw HALF, so shares remain to open a second request with. Taking
+    // everything leaves nothing to escrow, and the orphan cannot be recreated.
+    let half = fixture.token_balance(fixture.lp_share_account) / 2;
+    request_withdraw(&mut fixture, half).expect("request");
     fixture.advance(61, 2);
     lp_withdraw(&mut fixture, 1).expect("withdraw");
 
@@ -735,9 +738,9 @@ fn an_orphaned_escrow_can_be_closed_by_its_owner() {
     // alone, leaving exactly the pre-fix shape.
     fixture.svm.expire_blockhash();
     let remaining = fixture.token_balance(fixture.lp_share_account);
-    if remaining > 0 {
-        request_withdraw(&mut fixture, remaining).expect("second request");
-    }
+    assert!(remaining > 0, "need shares left to recreate the escrow");
+    request_withdraw(&mut fixture, remaining).expect("second request");
+
     let escrow = pda(&[b"withdraw_escrow", fixture.lp.pubkey().as_ref()]);
     let mut account = fixture.svm.get_account(&escrow).expect("escrow exists");
     account.data[64..72].copy_from_slice(&0u64.to_le_bytes());
@@ -772,10 +775,14 @@ fn an_orphaned_escrow_can_be_closed_by_its_owner() {
         .lamports;
     assert!(after > before, "rent should be returned to the owner");
 
-    // And the whole point: requesting a withdrawal is possible again.
+    // And the whole point: requesting a withdrawal is possible again. Deposit
+    // afresh first — the orphaned request moved the previous shares into the
+    // escrow that was then emptied by hand, so the LP holds none. Asserted
+    // unconditionally: skipping this when there happen to be no shares is how
+    // the first version of this test passed without proving anything.
     fixture.svm.expire_blockhash();
+    fixture.deposit(100 * ONE, 1).expect("deposit again");
     let left = fixture.token_balance(fixture.lp_share_account);
-    if left > 0 {
-        request_withdraw(&mut fixture, left).expect("request works again after recovery");
-    }
+    assert!(left > 0, "deposit should have minted shares");
+    request_withdraw(&mut fixture, left).expect("request works again after recovery");
 }
