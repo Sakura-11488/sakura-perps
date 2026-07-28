@@ -155,6 +155,50 @@ Source-to-bytecode traceability. Every deploy gets a row.
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `cb1fee92…f717289c` | `devnet-v0.1.0` | 2026-07-27 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `569798fe…0e324d47` | `devnet-v0.2.0` | 2026-07-27 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `7c833439…310bbab3` | `devnet-v0.3.0` | 2026-07-28 | `5JSAncTb…dKP` |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `5d879e58…07e61d2d` | `devnet-v0.4.0` | 2026-07-28 | `5JSAncTb…dKP` |
+
+### Pool round-trip, verified on devnet
+
+`devnet-v0.4.0` against Circle's devnet USDC
+(`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`), run twice by
+`tests/devnet-pool-roundtrip.ts`:
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| `lp_deposit` 2 USDC | 2,000,000 shares | 2,000,000 shares |
+| `request_withdraw` | ok | **ok** |
+| `lp_withdraw` | ok | ok |
+| LP balance after | 2 USDC | 2 USDC |
+| vault after | 18 USDC (unchanged) | 18 USDC (unchanged) |
+
+**Run 2 is the point.** It is the same liquidity provider's *second* withdrawal
+from the same pool. Before the escrow fix that call failed outright — see below.
+
+The vault keeps 18 USDC because the pool is shared and other deposits remain in
+it, including the `MINIMUM_LIQUIDITY` locked forever by the first-ever deposit.
+The invariant asserted is that a complete cycle returns the vault to exactly
+where it started, not that it empties.
+
+### The escrow bug this found
+
+`request_withdraw` creates a `WithdrawRequest` **and** an escrow token account at
+`[b"withdraw_escrow", owner]`. `lp_withdraw` closed only the first, so the escrow
+survived and the owner's next `request_withdraw` failed at account creation
+("already in use") — with no instruction in the program able to clear it. A
+provider could withdraw exactly once, ever, and the rest of their position was
+stranded.
+
+The whole SVM suite was green throughout: every test stopped after a single
+deposit-request-withdraw cycle, so nothing ever attempted a second. The devnet
+round-trip found it on its second run. `a_provider_can_withdraw_twice` now covers
+it, and asserts the escrow account is actually gone between cycles rather than
+inferring it from the next call succeeding.
+
+One live casualty remains as evidence: the admin wallet
+`5JSAncTb…dKP` still has a stranded escrow from a pre-fix run and can never
+withdraw from this pool again. Nothing in the program can close an escrow except
+`lp_withdraw`, which cannot be reached without `request_withdraw` succeeding
+first. Worth a recovery instruction before mainnet.
 
 ### Upgrading needs `program extend` first
 
