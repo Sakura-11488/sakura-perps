@@ -81,6 +81,746 @@
           }
         }
       ]
+    },
+    {
+      "name": "initialize_pool",
+      "docs": [
+        "Creates the shared liquidity pool, its collateral vault, and the LP share",
+        "mint. Admin-only, and callable once — the PDA seeds make a second call",
+        "fail at account creation rather than needing an explicit guard."
+      ],
+      "discriminator": [
+        95,
+        180,
+        10,
+        172,
+        84,
+        174,
+        232,
+        40
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "collateral_mint"
+        },
+        {
+          "name": "quote_vault",
+          "docs": [
+            "Program-owned, PDA-seeded, deliberately not an associated token account.",
+            "ATA derivation depends on the token program, and Token-2022 derives",
+            "differently — explicit seeds leave no ambiguity about which account this",
+            "is meant to be."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  111,
+                  116,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_mint",
+          "docs": [
+            "LP share mint. Freeze authority is `None` by omission — a freezable",
+            "share token would let an admin block redemptions."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  104,
+                  97,
+                  114,
+                  101,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool_share_account",
+          "docs": [
+            "Holds the permanently locked minimum liquidity."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108,
+                  95,
+                  115,
+                  104,
+                  97,
+                  114,
+                  101,
+                  115
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "docs": [
+            "Pinned to whichever program owns the collateral mint. `Interface` accepts",
+            "both the legacy and Token-2022 programs, so without this a caller could",
+            "present the wrong one."
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "InitializePoolParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "lp_deposit",
+      "docs": [
+        "Deposits collateral and mints LP shares.",
+        "",
+        "`min_shares_out` is mandatory rather than advisory: without it a",
+        "depositor has no defence against the share price moving between",
+        "simulation and execution."
+      ],
+      "discriminator": [
+        27,
+        77,
+        210,
+        69,
+        12,
+        43,
+        148,
+        16
+      ],
+      "accounts": [
+        {
+          "name": "depositor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "collateral_mint"
+        },
+        {
+          "name": "quote_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  111,
+                  116,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_mint",
+          "writable": true
+        },
+        {
+          "name": "depositor_token_account",
+          "writable": true
+        },
+        {
+          "name": "depositor_share_account",
+          "writable": true
+        },
+        {
+          "name": "pool_share_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108,
+                  95,
+                  115,
+                  104,
+                  97,
+                  114,
+                  101,
+                  115
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "min_shares_out",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "lp_withdraw",
+      "docs": [
+        "Burns escrowed shares and returns collateral, once the delay has elapsed."
+      ],
+      "discriminator": [
+        205,
+        206,
+        130,
+        170,
+        173,
+        51,
+        11,
+        169
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "withdraw_request"
+          ]
+        },
+        {
+          "name": "exchange",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "collateral_mint"
+        },
+        {
+          "name": "quote_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  111,
+                  116,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_mint",
+          "writable": true
+        },
+        {
+          "name": "withdraw_request",
+          "docs": [
+            "Closed on execution, returning rent to the owner. `has_one` binds the",
+            "request to its signer, so one provider cannot execute another's."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  95,
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_share_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_token_account",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "min_amount_out",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "probe_oracle",
+      "docs": [
+        "Validate a price feed against a set of guards and emit the result.",
+        "",
+        "Changes no state. Its purpose is to answer, on chain and against the real",
+        "account, the question that must be settled before a feed is qualified:",
+        "*does this feed currently produce a price this protocol would trade on?*",
+        "Guessing at that off-chain is how a market ends up listed against a feed",
+        "with the wrong exponent, or one that stopped updating last Tuesday.",
+        "",
+        "Permissionless, because it is a read with no effect. It is also where an",
+        "operator should start when a market has stopped trading and nobody knows",
+        "which of the seven checks is failing — the returned error names it.",
+        "",
+        "# Why `feed_id` comes from instruction data here, and must not elsewhere",
+        "",
+        "A probe asks \"does *this* account satisfy *these* guards for *this*",
+        "feed\", so all three necessarily come from the caller. Every instruction",
+        "that moves money must instead take `feed_id` from the market's stored",
+        "configuration. A caller-supplied id would simply be set to match whatever",
+        "account was handed over, turning the SDK's feed-id check — the thing",
+        "stopping a BONK price from reaching a SOL market — into a no-op."
+      ],
+      "discriminator": [
+        201,
+        60,
+        241,
+        243,
+        44,
+        211,
+        39,
+        33
+      ],
+      "accounts": [
+        {
+          "name": "price_update",
+          "docs": [
+            "The Pyth price update to inspect.",
+            "",
+            "`Account<PriceUpdateV2>` enforces that this is genuinely owned by the",
+            "Pyth receiver program; an arbitrary account with convincing-looking bytes",
+            "fails deserialisation rather than being believed."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "ProbeOracleParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "request_withdraw",
+      "docs": [
+        "Escrows shares and starts the withdrawal delay."
+      ],
+      "discriminator": [
+        137,
+        95,
+        187,
+        96,
+        250,
+        138,
+        31,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_mint",
+          "writable": true
+        },
+        {
+          "name": "owner_share_account",
+          "writable": true
+        },
+        {
+          "name": "withdraw_request",
+          "docs": [
+            "One request per owner. A second concurrent request fails at account",
+            "creation rather than silently overwriting the first and stranding its",
+            "escrowed shares."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  95,
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_share_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "shares",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "set_pause_flags",
+      "docs": [
+        "Sets the pause bitfield.",
+        "",
+        "The exchange is created with everything paused, which until now made it",
+        "permanently inert — there was no instruction that could lift it. Writing",
+        "the vault tests is what surfaced that: the first deposit any test tried",
+        "failed with `DepositsPaused` and there was nothing to do about it.",
+        "",
+        "Admin-only. A later milestone should let a keeper *tighten* flags without",
+        "being able to loosen them, so an automated circuit breaker can halt",
+        "trading without also being able to restart it."
+      ],
+      "discriminator": [
+        205,
+        167,
+        85,
+        237,
+        144,
+        202,
+        248,
+        175
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "flags",
+          "type": "u64"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -96,6 +836,32 @@
         104,
         50
       ]
+    },
+    {
+      "name": "Pool",
+      "discriminator": [
+        241,
+        154,
+        109,
+        4,
+        17,
+        177,
+        109,
+        188
+      ]
+    },
+    {
+      "name": "WithdrawRequest",
+      "discriminator": [
+        186,
+        239,
+        174,
+        191,
+        189,
+        13,
+        47,
+        196
+      ]
     }
   ],
   "events": [
@@ -110,6 +876,84 @@
         243,
         230,
         104
+      ]
+    },
+    {
+      "name": "LiquidityDeposited",
+      "discriminator": [
+        218,
+        155,
+        74,
+        193,
+        59,
+        66,
+        94,
+        122
+      ]
+    },
+    {
+      "name": "LiquidityWithdrawn",
+      "discriminator": [
+        240,
+        120,
+        73,
+        139,
+        154,
+        31,
+        218,
+        68
+      ]
+    },
+    {
+      "name": "OracleProbed",
+      "discriminator": [
+        7,
+        44,
+        2,
+        206,
+        233,
+        144,
+        129,
+        207
+      ]
+    },
+    {
+      "name": "PauseFlagsChanged",
+      "discriminator": [
+        56,
+        73,
+        67,
+        44,
+        237,
+        239,
+        68,
+        124
+      ]
+    },
+    {
+      "name": "PoolInitialized",
+      "discriminator": [
+        100,
+        118,
+        173,
+        87,
+        12,
+        198,
+        254,
+        229
+      ]
+    },
+    {
+      "name": "WithdrawRequested",
+      "discriminator": [
+        114,
+        16,
+        240,
+        206,
+        93,
+        128,
+        151,
+        39
       ]
     }
   ],
@@ -128,6 +972,161 @@
       "code": 6002,
       "name": "MathOverflow",
       "msg": "Arithmetic overflow."
+    },
+    {
+      "code": 6003,
+      "name": "OraclePriceUnavailable",
+      "msg": "Oracle price could not be read, or failed Pyth verification."
+    },
+    {
+      "code": 6004,
+      "name": "OracleStale",
+      "msg": "Oracle price is older than this market permits."
+    },
+    {
+      "code": 6005,
+      "name": "OracleConfidenceTooWide",
+      "msg": "Oracle confidence interval is too wide to trade on."
+    },
+    {
+      "code": 6006,
+      "name": "OraclePriceOutOfBand",
+      "msg": "Oracle price is outside the market's configured sanity band."
+    },
+    {
+      "code": 6007,
+      "name": "OracleExponentChanged",
+      "msg": "Oracle exponent differs from the value recorded when the feed was qualified."
+    },
+    {
+      "code": 6008,
+      "name": "OraclePriceFromTheFuture",
+      "msg": "Oracle price claims to have been published in the future."
+    },
+    {
+      "code": 6009,
+      "name": "OracleInvalidPrice",
+      "msg": "Oracle price is zero or negative."
+    },
+    {
+      "code": 6010,
+      "name": "NegativeAmount",
+      "msg": "Amount must be non-negative."
+    },
+    {
+      "code": 6011,
+      "name": "ZeroSize",
+      "msg": "Position size must be non-zero."
+    },
+    {
+      "code": 6012,
+      "name": "InvalidBasisPoints",
+      "msg": "Basis points exceed 10000."
+    },
+    {
+      "code": 6013,
+      "name": "EmptyPool",
+      "msg": "Pool has no shares outstanding."
+    },
+    {
+      "code": 6014,
+      "name": "InvalidMarginParameters",
+      "msg": "Initial margin must exceed maintenance margin plus liquidation fee."
+    },
+    {
+      "code": 6015,
+      "name": "NotAdmin",
+      "msg": "Only the exchange admin may do this."
+    },
+    {
+      "code": 6016,
+      "name": "FlowFeeTooHigh",
+      "msg": "Deposit or withdraw fee exceeds the permitted maximum."
+    },
+    {
+      "code": 6017,
+      "name": "WithdrawDelayTooLong",
+      "msg": "Withdrawal delay exceeds the permitted maximum."
+    },
+    {
+      "code": 6018,
+      "name": "DepositsPaused",
+      "msg": "Liquidity deposits are paused."
+    },
+    {
+      "code": 6019,
+      "name": "WithdrawalsPaused",
+      "msg": "Liquidity withdrawals are paused."
+    },
+    {
+      "code": 6020,
+      "name": "ZeroAmount",
+      "msg": "Amount must be greater than zero."
+    },
+    {
+      "code": 6021,
+      "name": "ZeroSharesMinted",
+      "msg": "Deposit would mint zero shares."
+    },
+    {
+      "code": 6022,
+      "name": "SlippageExceeded",
+      "msg": "Result was worse than the caller's stated minimum."
+    },
+    {
+      "code": 6023,
+      "name": "PoolCapReached",
+      "msg": "Pool has reached its deposit cap."
+    },
+    {
+      "code": 6024,
+      "name": "InsufficientPoolEquity",
+      "msg": "Withdrawal exceeds liquidity providers' equity."
+    },
+    {
+      "code": 6025,
+      "name": "UtilizationTooHigh",
+      "msg": "Withdrawal would push utilisation past the configured ceiling."
+    },
+    {
+      "code": 6026,
+      "name": "WithdrawTooSoon",
+      "msg": "Withdrawal delay has not elapsed."
+    },
+    {
+      "code": 6027,
+      "name": "NotRequestOwner",
+      "msg": "Withdraw request belongs to a different owner."
+    },
+    {
+      "code": 6028,
+      "name": "NotTokenOwner",
+      "msg": "Token account is not owned by the expected authority."
+    },
+    {
+      "code": 6029,
+      "name": "WrongCollateralMint",
+      "msg": "Mint is not this exchange's collateral mint."
+    },
+    {
+      "code": 6030,
+      "name": "WrongShareMint",
+      "msg": "Mint is not this pool's share mint."
+    },
+    {
+      "code": 6031,
+      "name": "WrongTokenProgram",
+      "msg": "Token program does not match the one pinned at initialization."
+    },
+    {
+      "code": 6032,
+      "name": "VaultInsolvent",
+      "msg": "Vault balance is below the pool's recorded liabilities."
+    },
+    {
+      "code": 6033,
+      "name": "InvalidPauseFlags",
+      "msg": "Pause bitfield contains bits that are not defined."
     }
   ],
   "types": [
@@ -273,6 +1272,635 @@
               "Protocol's cut of trading fees in bps; the remainder accrues to LPs."
             ],
             "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InitializePoolParams",
+      "docs": [
+        "Arguments to [`crate::sakura_perps::initialize_pool`]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "deposit_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "withdraw_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "withdraw_delay_seconds",
+            "type": "u32"
+          },
+          {
+            "name": "max_utilization_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_aum_quote",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LiquidityDeposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "depositor",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_in",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "shares_minted",
+            "type": "u64"
+          },
+          {
+            "name": "total_shares",
+            "type": "u64"
+          },
+          {
+            "name": "quote_deposited",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LiquidityWithdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "amount_out",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "total_shares",
+            "type": "u64"
+          },
+          {
+            "name": "quote_deposited",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OracleProbed",
+      "docs": [
+        "Emitted by [`sakura_perps::probe_oracle`] when a feed passes every check."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "price_update",
+            "docs": [
+              "The price update account inspected."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "feed_id",
+            "docs": [
+              "The feed id it was checked against."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "price",
+            "docs": [
+              "Validated price, at `PRICE_SCALE`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "confidence",
+            "docs": [
+              "Validated confidence interval, at `PRICE_SCALE`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "publish_time",
+            "docs": [
+              "Upstream publish time."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "posted_slot",
+            "docs": [
+              "Slot at which the update landed on chain."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "probed_at_slot",
+            "docs": [
+              "Slot at which the probe ran, so staleness is reconstructible from the log."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PauseFlagsChanged",
+      "docs": [
+        "Emitted whenever the pause bitfield changes, so the transition is auditable",
+        "from logs rather than only inferable from account diffs."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous",
+            "type": "u64"
+          },
+          {
+            "name": "current",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Pool",
+      "docs": [
+        "The shared liquidity pool."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "docs": [
+              "Bump for the vault PDA, stored so signing does not re-derive it."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "share_mint",
+            "docs": [
+              "Mint of the LP share token. Authority is the pool PDA; freeze authority",
+              "is deliberately `None` — a freezable share token lets an admin block",
+              "redemptions, which is a trust red flag before it is anything else."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "quote_vault",
+            "docs": [
+              "Program-owned token account holding collateral."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "total_shares",
+            "docs": [
+              "Shares outstanding. Mirrors `share_mint.supply` and is asserted equal."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "quote_deposited",
+            "docs": [
+              "Liquidity providers' equity. **This is AUM.** Never `quote_vault.amount`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "locked_quote",
+            "docs": [
+              "Trader collateral held by the pool on their behalf. Not LP equity, and",
+              "not available for withdrawal."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "pending_protocol_fees",
+            "docs": [
+              "Accrued protocol fees, owed to `exchange.fee_recipient`. Not LP equity."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "reserved_quote",
+            "docs": [
+              "Reserved against open positions' potential profit."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "deposit_fee_bps",
+            "docs": [
+              "Fee charged on deposit, in bps."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "withdraw_fee_bps",
+            "docs": [
+              "Fee charged on withdrawal, in bps."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "withdraw_delay_seconds",
+            "docs": [
+              "Seconds between requesting a withdrawal and being able to execute it."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "max_utilization_bps",
+            "docs": [
+              "Utilisation ceiling a withdrawal may not push the pool past."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_aum_quote",
+            "docs": [
+              "Hard cap on `quote_deposited`. Essential on the way to mainnet: it bounds",
+              "what can be lost while the protocol is still unproven."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoolInitialized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "quote_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "max_aum_quote",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PriceFeedMessage",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "feed_id",
+            "docs": [
+              "`FeedId` but avoid the type alias because of compatibility issues with Anchor's `idl-build` feature."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "price",
+            "type": "i64"
+          },
+          {
+            "name": "conf",
+            "type": "u64"
+          },
+          {
+            "name": "exponent",
+            "type": "i32"
+          },
+          {
+            "name": "publish_time",
+            "docs": [
+              "The timestamp of this price update in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "prev_publish_time",
+            "docs": [
+              "The timestamp of the previous price update. This field is intended to allow users to",
+              "identify the single unique price update for any moment in time:",
+              "for any time t, the unique update is the one such that prev_publish_time < t <= publish_time.",
+              "",
+              "Note that there may not be such an update while we are migrating to the new message-sending logic,",
+              "as some price updates on pythnet may not be sent to other chains (because the message-sending",
+              "logic may not have triggered). We can solve this problem by making the message-sending mandatory",
+              "(which we can do once publishers have migrated over).",
+              "",
+              "Additionally, this field may be equal to publish_time if the message is sent on a slot where",
+              "where the aggregation was unsuccesful. This problem will go away once all publishers have",
+              "migrated over to a recent version of pyth-agent."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "ema_price",
+            "type": "i64"
+          },
+          {
+            "name": "ema_conf",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PriceUpdateV2",
+      "docs": [
+        "A price update account. This account is used by the Pyth Receiver program to store a verified price update from a Pyth price feed.",
+        "It contains:",
+        "- `write_authority`: The write authority for this account. This authority can close this account to reclaim rent or update the account to contain a different price update.",
+        "- `verification_level`: The [`VerificationLevel`] of this price update. This represents how many Wormhole guardian signatures have been verified for this price update.",
+        "- `price_message`: The actual price update.",
+        "- `posted_slot`: The slot at which this price update was posted."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "write_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "verification_level",
+            "type": {
+              "defined": {
+                "name": "VerificationLevel"
+              }
+            }
+          },
+          {
+            "name": "price_message",
+            "type": {
+              "defined": {
+                "name": "PriceFeedMessage"
+              }
+            }
+          },
+          {
+            "name": "posted_slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProbeOracleParams",
+      "docs": [
+        "Arguments to [`sakura_perps::probe_oracle`].",
+        "",
+        "Every guard is explicit rather than defaulted. A probe whose thresholds were",
+        "implicit would answer a different question from the one the caller asked, and",
+        "the whole point is to establish exactly which threshold a feed fails."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "feed_id",
+            "docs": [
+              "The 32-byte Pyth feed id this account is expected to carry."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "max_age_seconds",
+            "docs": [
+              "Maximum age by upstream publish time, in seconds."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "max_age_slots",
+            "docs": [
+              "Maximum age by slots since the update landed on chain."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_future_skew_seconds",
+            "docs": [
+              "Tolerance for a publish time ahead of the cluster clock, in seconds."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "max_confidence_bps",
+            "docs": [
+              "Maximum confidence interval as a fraction of price, in basis points."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "min_price",
+            "docs": [
+              "Lower bound of the sanity band, at `PRICE_SCALE`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "max_price",
+            "docs": [
+              "Upper bound of the sanity band, at `PRICE_SCALE`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "expected_exponent",
+            "docs": [
+              "The exponent the feed is expected to publish."
+            ],
+            "type": "i32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VerificationLevel",
+      "docs": [
+        "Pyth price updates are bridged to all blockchains via Wormhole.",
+        "Using the price updates on another chain requires verifying the signatures of the Wormhole guardians.",
+        "The usual process is to check the signatures for two thirds of the total number of guardians, but this can be cumbersome on Solana because of the transaction size limits,",
+        "so we also allow for partial verification.",
+        "",
+        "This enum represents how much a price update has been verified:",
+        "- If `Full`, we have verified the signatures for two thirds of the current guardians.",
+        "- If `Partial`, only `num_signatures` guardian signatures have been checked.",
+        "",
+        "# Warning",
+        "Using partially verified price updates is dangerous, as it lowers the threshold of guardians that need to collude to produce a malicious price update."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Partial",
+            "fields": [
+              {
+                "name": "num_signatures",
+                "type": "u8"
+              }
+            ]
+          },
+          {
+            "name": "Full"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawRequest",
+      "docs": [
+        "A pending withdrawal. Created by `request_withdraw`, consumed by `lp_withdraw`.",
+        "",
+        "Shares are moved into escrow on request rather than merely recorded, so the",
+        "requester cannot transfer them away and still redeem."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "shares",
+            "docs": [
+              "Shares held in escrow for this request."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "requested_at",
+            "docs": [
+              "When the request was made. Execution is gated on this plus the delay."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "requested_slot",
+            "docs": [
+              "Slot of the request, so a same-slot request-and-execute is detectable",
+              "even if the clock has not advanced a whole second."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawRequested",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "executable_at",
+            "type": "i64"
           }
         ]
       }

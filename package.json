@@ -9,7 +9,9 @@
     "lint:fix": "prettier --write 'tests/**/*.ts'"
   },
   "dependencies": {
-    "@coral-xyz/anchor": "^1.1.2"
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.98.0",
+    "@solana/spl-token": "^0.4.9"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.5",
@@ -19,6 +21,7 @@
     "mocha": "^10.3.0",
     "prettier": "^3.2.5",
     "ts-mocha": "^10.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2"
   }
 }

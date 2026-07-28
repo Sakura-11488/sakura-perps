@@ -140,6 +140,35 @@ Source-to-bytecode traceability. Every deploy gets a row.
 |---|---|---|---|---|---|
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `cb1fee92…f717289c` | `devnet-v0.1.0` | 2026-07-27 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `569798fe…0e324d47` | `devnet-v0.2.0` | 2026-07-27 | `5JSAncTb…dKP` |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `7c833439…310bbab3` | `devnet-v0.3.0` | 2026-07-28 | `5JSAncTb…dKP` |
+
+### Upgrading needs `program extend` first
+
+The pool took the `.so` from 183,024 bytes to **418,896**, which does not fit the
+ProgramData account the earlier deploys allocated — `solana program deploy` fails
+on size before writing anything. Extend first, then deploy:
+
+```bash
+# 183,024 -> 524,288 (512 KiB), leaving headroom for the next milestone
+solana program extend <program-id> 341264 --url "$RPC" -k <deployer>
+solana program deploy target/deploy/sakura_perps.so \
+  --program-id <program-id> --upgrade-authority <deployer> -k <deployer> --url "$RPC"
+```
+
+Two things that cost time here. Pass the program **address** to `--program-id`,
+not a keypair path containing spaces — the CLI rejects that as an "unrecognized
+signer source", and for an upgrade the address is what it wants anyway because
+the upgrade authority is the signer. And `solana program dump` returns the whole
+allocation, so the file is padded with zeros to 524,288; truncate to the `.so`
+length before comparing hashes or it will never match:
+
+```bash
+solana program dump <program-id> onchain.so --url "$RPC"
+head -c 418896 onchain.so | sha256sum   # == the artifact's sha256
+```
+
+`devnet-v0.3.0` was verified that way: on-chain bytes are byte-identical to the
+CI artifact from run 30300839145 (`ac1cd48`), and the padding is all zero.
 
 ### Oracle validation, verified on devnet
 
