@@ -502,8 +502,8 @@ pub fn settle_close(
 
     // The fee cannot exceed the payout: there is nothing else to take it from,
     // and a position must never close owing money it has already surrendered.
-    let close_fee_quote =
-        crate::scale::usd_to_quote_ceil(close_fee_usd, collateral_decimals)?.min(gross_payout_quote);
+    let close_fee_quote = crate::scale::usd_to_quote_ceil(close_fee_usd, collateral_decimals)?
+        .min(gross_payout_quote);
     let net_payout_quote = gross_payout_quote
         .checked_sub(close_fee_quote)
         .ok_or(RiskError::MathOverflow)?;
