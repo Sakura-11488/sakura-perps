@@ -15,7 +15,8 @@ use sakura_perps_risk::funding::{
 };
 use sakura_perps_risk::math::{ceil_div, mul_div_ceil, mul_div_floor, mul_div_i128, pow10};
 use sakura_perps_risk::pool::{
-    assets_for_shares, aum_usd, flow_fee, shares_for_deposit, utilization_bps, MINIMUM_LIQUIDITY,
+    assets_for_shares, aum_usd, flow_fee, shares_for_deposit, utilization_bps,
+    withdrawal_leaves_enough_reserve, MINIMUM_LIQUIDITY,
 };
 use sakura_perps_risk::position::{
     blended_entry_price, equity, is_liquidatable, leverage_bps, liquidation_fee, liquidation_price,
@@ -606,6 +607,54 @@ proptest! {
         let second = fees_dominate_funding(open, close, cap, seconds);
         prop_assert_eq!(first, second);
     }
+
+    /// The reserve ceiling admits exactly the states satisfying the true
+    /// rational `reserved / aum <= max_bps / 10_000`, and no others.
+    ///
+    /// The comparison on the right is computed here independently — plain
+    /// `u128` products, which cannot overflow at these bounds (1e12 × 1e4).
+    /// Asserting against `utilization_bps` instead would restate the old
+    /// implementation and prove nothing; that floored comparison is the bug,
+    /// and it is the same tautology `fee_dominance_check_is_consistent` above
+    /// is careful to avoid.
+    #[test]
+    fn the_reserve_ceiling_is_the_exact_rational(
+        aum in 1u128..1_000_000_000_000u128,
+        reserved in 0u128..1_000_000_000_000u128,
+        max_bps in 0u16..10_000,
+    ) {
+        let admitted = withdrawal_leaves_enough_reserve(aum, reserved, max_bps).unwrap();
+        let exact = reserved * 10_000 <= max_bps as u128 * aum;
+        prop_assert_eq!(admitted, exact);
+    }
+
+    /// A state that reserves more than the pool holds is never admitted, at any
+    /// ceiling. This is the consequence that actually matters: the last position
+    /// to close cannot be paid, and becomes permanently unclosable.
+    #[test]
+    fn reserving_more_than_aum_is_never_admitted(
+        aum in 1u128..1_000_000_000_000u128,
+        excess in 1u128..1_000_000u128,
+        max_bps in 0u16..10_000,
+    ) {
+        let reserved = aum + excess;
+        prop_assert!(!withdrawal_leaves_enough_reserve(aum, reserved, max_bps).unwrap());
+    }
+}
+
+/// The exact case that used to slip through: floored utilisation of
+/// `20_001 / 20_000` is 10_000 bps, which satisfied a 10_000 ceiling despite
+/// reserving one base unit more than the pool holds.
+#[test]
+fn the_one_basis_point_overhang_is_refused() {
+    // A 100% ceiling is no longer constructible on chain (initialize_pool
+    // rejects it), but the pure function must still refuse the state.
+    assert!(!withdrawal_leaves_enough_reserve(20_000, 20_001, 10_000).unwrap());
+    // And the boundary itself stays admissible: exactly 100% utilisation.
+    assert!(withdrawal_leaves_enough_reserve(20_000, 20_000, 10_000).unwrap());
+    // A realistic ceiling refuses well before that.
+    assert!(!withdrawal_leaves_enough_reserve(20_000, 16_001, 8_000).unwrap());
+    assert!(withdrawal_leaves_enough_reserve(20_000, 16_000, 8_000).unwrap());
 }
 
 // ── Oracle validation ───────────────────────────────────────────────────────

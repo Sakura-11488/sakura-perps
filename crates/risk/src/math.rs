@@ -51,6 +51,19 @@ fn mul_wide(a: u128, b: u128) -> (u128, u128) {
     (high, low)
 }
 
+/// Compare `a × b` against `c × d` exactly — no division, no rounding.
+///
+/// Exists so a ratio comparison can be written as the true rational instead of
+/// as a comparison between two floored quotients. `floor(x) <= floor(y)` is not
+/// `x <= y`, and that substitution is exactly what let a utilisation of
+/// 100.005% satisfy a 100% ceiling: both floored to 10 000 bps.
+///
+/// Both products go through the full 256-bit intermediate, so no combination of
+/// `u128` inputs can overflow and there is no fast path to get wrong.
+pub fn cmp_products(a: u128, b: u128, c: u128, d: u128) -> core::cmp::Ordering {
+    mul_wide(a, b).cmp(&mul_wide(c, d))
+}
+
 /// Divide a 256-bit value `(high, low)` by `d`, returning `(quotient, remainder)`.
 ///
 /// Errors with [`RiskError::MathOverflow`] when the quotient would not fit in

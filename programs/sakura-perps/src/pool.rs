@@ -150,8 +150,11 @@ pub fn handle_initialize_pool(
         params.withdraw_delay_seconds <= MAX_WITHDRAW_DELAY_SECONDS,
         PerpsError::WithdrawDelayTooLong
     );
+    // Strictly below 100%: a ceiling equal to AUM permits reserving every asset
+    // the pool has, leaving nothing to absorb the next adverse move, and it is
+    // the boundary the floored-utilisation comparison used to leak through.
     require!(
-        params.max_utilization_bps <= crate::BPS_DENOMINATOR,
+        params.max_utilization_bps < crate::BPS_DENOMINATOR,
         PerpsError::InvalidBasisPoints
     );
 
@@ -396,12 +399,22 @@ pub fn handle_lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Resu
     )
     .map_err(crate::oracle::map_risk_error)?;
 
+    // `assets_for_shares` returns 0 rather than erroring when the shares round
+    // down to nothing, and every check below passes trivially on zero: the fee
+    // is 0, `net >= min_amount_out` holds for anyone who sent 0, and
+    // `gross <= quote_deposited` is vacuous. The burn and the `total_shares`
+    // decrement would still execute, destroying the position for no payout and
+    // handing the value to the remaining providers. Mirrors the `net > 0` guard
+    // `lp_deposit` already carries.
+    require!(gross > 0, PerpsError::ZeroAmount);
+
     let fee = to_u64(
         risk_pool::flow_fee(gross as u128, pool.withdraw_fee_bps)
             .map_err(crate::oracle::map_risk_error)?,
     )
     .map_err(crate::oracle::map_risk_error)?;
     let net = gross.checked_sub(fee).ok_or(PerpsError::MathOverflow)?;
+    require!(net > 0, PerpsError::ZeroAmount);
 
     require!(net >= min_amount_out, PerpsError::SlippageExceeded);
 
@@ -882,4 +895,113 @@ pub struct CloseStaleEscrow<'info> {
 pub struct StaleEscrowClosed {
     pub pool: Pubkey,
     pub owner: Pubkey,
+}
+
+/// Abandon a pending withdrawal and take the escrowed shares back.
+///
+/// Without this a request that cannot complete is a trap: the utilisation
+/// ceiling alone is enough to make `lp_withdraw` fail indefinitely, and the
+/// shares sit in escrow with no way out. `close_stale_escrow` deliberately
+/// refuses that state — it requires an empty escrow and no live request, which
+/// is the exact opposite of this case — so the two instructions are genuinely
+/// distinct rather than one being a special case of the other.
+///
+/// Not gated on `PauseFlags`, for the same reason as `close_stale_escrow`:
+/// withdrawing shares from escrow returns the owner to where they already were,
+/// moves no pool assets, and a pause must not be able to strand them.
+pub fn handle_cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
+    let shares = ctx.accounts.withdraw_request.shares;
+    let escrow = &ctx.accounts.escrow_share_account;
+
+    // Pay back exactly what is in escrow, not what the request claims. If they
+    // ever disagreed, the token account is the truth and the difference must
+    // not be minted out of the discrepancy.
+    require!(escrow.amount == shares, PerpsError::EscrowNotEmpty);
+    require!(shares > 0, PerpsError::ZeroAmount);
+
+    let pool = &ctx.accounts.pool;
+    let pool_seeds: &[&[u8]] = &[b"pool", &[pool.bump]];
+    let signer: &[&[&[u8]]] = &[pool_seeds];
+
+    token_interface::transfer_checked(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.key(),
+            TransferChecked {
+                from: escrow.to_account_info(),
+                mint: ctx.accounts.share_mint.to_account_info(),
+                to: ctx.accounts.owner_share_account.to_account_info(),
+                authority: pool.to_account_info(),
+            },
+            signer,
+        ),
+        shares,
+        SHARE_DECIMALS,
+    )?;
+
+    // Close the escrow as well as the request. Leaving it behind is exactly the
+    // orphan that made a provider's second `request_withdraw` fail with
+    // "already in use" and required `close_stale_escrow` to exist.
+    token_interface::close_account(CpiContext::new_with_signer(
+        ctx.accounts.token_program.key(),
+        token_interface::CloseAccount {
+            account: escrow.to_account_info(),
+            destination: ctx.accounts.owner.to_account_info(),
+            authority: pool.to_account_info(),
+        },
+        signer,
+    ))?;
+
+    emit!(WithdrawCancelled {
+        pool: pool.key(),
+        owner: ctx.accounts.owner.key(),
+        shares,
+    });
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct CancelWithdraw<'info> {
+    /// Receives both the escrowed shares and the reclaimed rent. The seeds below
+    /// bind the request and escrow to this signer, so nobody can cancel anyone
+    /// else's withdrawal.
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(seeds = [b"pool"], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(address = pool.share_mint @ PerpsError::WrongShareMint)]
+    pub share_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(
+        mut,
+        constraint = owner_share_account.mint == pool.share_mint @ PerpsError::WrongShareMint,
+        constraint = owner_share_account.owner == owner.key() @ PerpsError::NotTokenOwner,
+    )]
+    pub owner_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [b"withdraw_request", owner.key().as_ref()],
+        bump = withdraw_request.bump,
+    )]
+    pub withdraw_request: Box<Account<'info, WithdrawRequest>>,
+
+    #[account(
+        mut,
+        seeds = [b"withdraw_escrow", owner.key().as_ref()],
+        bump,
+    )]
+    pub escrow_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+#[event]
+pub struct WithdrawCancelled {
+    pub pool: Pubkey,
+    pub owner: Pubkey,
+    pub shares: u64,
 }

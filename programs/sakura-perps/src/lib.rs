@@ -216,6 +216,16 @@ pub mod sakura_perps {
         pool::handle_close_stale_escrow(ctx)
     }
 
+    /// Abandons a pending withdrawal, returning the escrowed shares and closing
+    /// both the request and its escrow.
+    ///
+    /// A request that cannot execute — the utilisation ceiling alone is enough
+    /// to cause this — otherwise strands its shares forever: `lp_withdraw` keeps
+    /// failing, and `close_stale_escrow` refuses a funded escrow by design.
+    pub fn cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
+        pool::handle_cancel_withdraw(ctx)
+    }
+
     /// Sets the pause bitfield.
     ///
     /// The exchange is created with everything paused, which until now made it

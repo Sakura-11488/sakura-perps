@@ -677,6 +677,118 @@ fn close_stale_escrow(fixture: &mut Fixture) -> Result<(), TransactionError> {
     fixture.send(instruction, &[&lp])
 }
 
+fn cancel_withdraw(fixture: &mut Fixture) -> Result<(), TransactionError> {
+    let owner = fixture.lp.pubkey();
+    let instruction = Instruction {
+        program_id: sakura_perps::ID,
+        accounts: sakura_perps::accounts::CancelWithdraw {
+            owner,
+            pool: fixture.pool,
+            share_mint: fixture.share_mint,
+            owner_share_account: fixture.lp_share_account,
+            withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
+            escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
+            token_program: spl_token_id(),
+        }
+        .to_account_metas(None),
+        data: sakura_perps::instruction::CancelWithdraw {}.data(),
+    };
+    let lp = fixture.lp.insecure_clone();
+    fixture.send(instruction, &[&lp])
+}
+
+/// A pending withdrawal can be abandoned, and every escrowed share comes back.
+///
+/// Without this, a request that cannot execute is a permanent trap: the
+/// utilisation ceiling alone can keep `lp_withdraw` failing, and
+/// `close_stale_escrow` refuses a funded escrow by design.
+#[test]
+fn a_pending_withdrawal_can_be_cancelled() {
+    let mut fixture = Fixture::new(default_params());
+    fixture.deposit(1_000 * ONE, 1).expect("deposit");
+
+    let before = fixture.token_balance(fixture.lp_share_account);
+    let shares = before / 2;
+    request_withdraw(&mut fixture, shares).expect("request");
+    assert_eq!(
+        fixture.token_balance(fixture.lp_share_account),
+        before - shares,
+        "shares should be held in escrow"
+    );
+
+    cancel_withdraw(&mut fixture).expect("cancel");
+
+    assert_eq!(
+        fixture.token_balance(fixture.lp_share_account),
+        before,
+        "every escrowed share returns"
+    );
+
+    // Both accounts must be gone, or the next request fails with "already in
+    // use" — the same orphan `close_stale_escrow` had to be written to undo.
+    let escrow = pda(&[b"withdraw_escrow", fixture.lp.pubkey().as_ref()]);
+    let request = pda(&[b"withdraw_request", fixture.lp.pubkey().as_ref()]);
+    assert!(
+        fixture
+            .svm
+            .get_account(&escrow)
+            .map_or(true, |a| a.lamports == 0),
+        "escrow must be closed"
+    );
+    assert!(
+        fixture
+            .svm
+            .get_account(&request)
+            .map_or(true, |a| a.lamports == 0),
+        "request must be closed"
+    );
+}
+
+/// Cancelling leaves the provider able to request again. A resource created
+/// per-operation gets exercised twice — the lesson `lp_withdraw` taught.
+#[test]
+fn a_provider_can_request_again_after_cancelling() {
+    let mut fixture = Fixture::new(default_params());
+    fixture.deposit(1_000 * ONE, 1).expect("deposit");
+    let shares = fixture.token_balance(fixture.lp_share_account);
+
+    request_withdraw(&mut fixture, shares).expect("first request");
+    cancel_withdraw(&mut fixture).expect("cancel");
+
+    fixture.svm.expire_blockhash();
+    request_withdraw(&mut fixture, shares).expect("second request after cancel");
+}
+
+/// A 100% utilisation ceiling is refused at construction, because it is not a
+/// ceiling: it permits reserving every asset the pool holds.
+///
+/// It is also the exact boundary the floored-utilisation comparison leaked
+/// through — `utilization_bps(20_001, 20_000)` floors to 10 000, which
+/// satisfied a 10 000 cap while reserving more than the pool had.
+///
+/// Asserted through a panic because `Fixture::new` expects the pool to
+/// initialise; the panic *is* the rejection, and catching it keeps the test
+/// exercising the real instruction rather than a re-derived predicate.
+#[test]
+fn a_hundred_percent_utilization_ceiling_is_refused() {
+    let mut params = default_params();
+    params.max_utilization_bps = 10_000;
+
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Fixture::new(params);
+    }));
+    assert!(
+        built.is_err(),
+        "initialize_pool must reject max_utilization_bps == BPS_DENOMINATOR"
+    );
+
+    // And the value one basis point below it is still accepted, so the bound is
+    // exclusive rather than the whole range having been narrowed.
+    let mut ok_params = default_params();
+    ok_params.max_utilization_bps = 9_999;
+    Fixture::new(ok_params);
+}
+
 /// An escrow still holding shares is not stale, and must not be discarded.
 ///
 /// This is the case that would burn a provider's claim: the shares are in
