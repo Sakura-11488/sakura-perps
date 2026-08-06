@@ -732,14 +732,14 @@ fn a_pending_withdrawal_can_be_cancelled() {
         fixture
             .svm
             .get_account(&escrow)
-            .map_or(true, |a| a.lamports == 0),
+            .is_none_or(|a| a.lamports == 0),
         "escrow must be closed"
     );
     assert!(
         fixture
             .svm
             .get_account(&request)
-            .map_or(true, |a| a.lamports == 0),
+            .is_none_or(|a| a.lamports == 0),
         "request must be closed"
     );
 }
