@@ -198,24 +198,40 @@ pub fn withdrawal_leaves_enough_reserve(
     if reserved_usd == 0 {
         return Ok(true);
     }
-    if aum_after_usd == 0 {
+    utilization_within_cap(reserved_usd, aum_after_usd, max_utilization_bps)
+}
+
+/// Whether `reserved / aum` sits within `max_utilization_bps`, compared as the
+/// **exact rational** — `reserved × 10_000 <= max_bps × aum`.
+///
+/// Separate from [`withdrawal_leaves_enough_reserve`] because reserving at open
+/// time asks the same question about a different quantity, and both callers must
+/// get the identical answer. Comparing a *floored* utilisation instead admitted
+/// an overhang of up to one basis point of AUM: `utilization_bps(20_001,
+/// 20_000)` floors to 10 000 and satisfies a 10 000 ceiling despite reserving
+/// more than the pool holds. The harm is not the rounding dust — it is that the
+/// last position to close cannot be paid, its `checked_sub` fails, and it
+/// becomes permanently unclosable.
+pub fn utilization_within_cap(
+    reserved_usd: u128,
+    aum_usd: u128,
+    max_utilization_bps: u16,
+) -> Result<bool, RiskError> {
+    if max_utilization_bps as u128 > BPS_DENOMINATOR {
+        return Err(RiskError::InvalidBasisPoints);
+    }
+    if reserved_usd == 0 {
+        return Ok(true);
+    }
+    if aum_usd == 0 {
         return Ok(false);
     }
-    // The exact rational `reserved / aum <= max_bps / BPS_DENOMINATOR`, written
-    // as `reserved × BPS_DENOMINATOR <= max_bps × aum`.
-    //
-    // Comparing a *floored* utilisation instead admitted an overhang of up to
-    // one basis point of AUM: `utilization_bps(20_001, 20_000)` floors to
-    // 10_000, which satisfies a 10_000 ceiling even though the pool has
-    // reserved more than it holds. The harm is not the rounding dust — it is
-    // that the last position to close cannot be paid, its `checked_sub` fails,
-    // and the position becomes permanently unclosable.
     Ok(matches!(
         crate::math::cmp_products(
             reserved_usd,
             BPS_DENOMINATOR,
             max_utilization_bps as u128,
-            aum_after_usd,
+            aum_usd,
         ),
         core::cmp::Ordering::Less | core::cmp::Ordering::Equal
     ))

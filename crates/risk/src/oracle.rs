@@ -256,11 +256,19 @@ pub fn validate_price(
 
     // Second clock: how long ago it landed here, regardless of what the upstream
     // timestamp claims.
-    if now_slot > raw.posted_slot {
-        let slots_elapsed = now_slot - raw.posted_slot;
-        if slots_elapsed > guards.max_age_slots {
-            return Err(RiskError::StalePrice);
-        }
+    //
+    // A `posted_slot` ahead of the current slot is rejected outright rather than
+    // skipped. The previous `if now_slot > raw.posted_slot` meant a future slot
+    // fell through the entire check in silence — so the one clock a publisher
+    // cannot influence was validated in a single direction, while a future
+    // `publish_time` got a dedicated error. This module's header says it fails
+    // closed.
+    if raw.posted_slot > now_slot {
+        return Err(RiskError::PriceFromTheFuture);
+    }
+    let slots_elapsed = now_slot - raw.posted_slot;
+    if slots_elapsed > guards.max_age_slots {
+        return Err(RiskError::StalePrice);
     }
 
     let price = normalize_price(raw.mantissa, raw.exponent)?;
@@ -320,6 +328,42 @@ pub fn diverges_beyond(
     Ok(scaled > limit)
 }
 
+/// Assert that the trading guards are no looser than the liquidation guards on
+/// every axis.
+///
+/// The two sets exist so a position can still be liquidated on a price too stale
+/// or too uncertain to open against. That only holds while trading is the
+/// tighter of the two: if an admin qualifies a feed whose trading guards are
+/// *looser*, positions become openable at prices on which they cannot be
+/// liquidated — leverage against a price the protocol has already declared it
+/// does not trust enough to act on.
+///
+/// Checked once when a feed is qualified, not per trade. `crates/risk` already
+/// property-tests that the built-in `for_trading` / `for_liquidation` pair
+/// satisfies this; the point here is that admin-supplied values must too.
+pub fn validate_guard_ordering(
+    trading: &OracleGuards,
+    liquidation: &OracleGuards,
+) -> Result<(), RiskError> {
+    let ordered = trading.max_age_seconds <= liquidation.max_age_seconds
+        && trading.max_age_slots <= liquidation.max_age_slots
+        && trading.max_future_skew_seconds <= liquidation.max_future_skew_seconds
+        && trading.max_confidence_bps <= liquidation.max_confidence_bps;
+    if !ordered {
+        return Err(RiskError::GuardsNotOrdered);
+    }
+    // The sanity band and exponent describe the feed, not the tolerance, so they
+    // must be identical rather than merely ordered — a liquidation priced
+    // outside the band traders opened against is a different asset.
+    if trading.min_price != liquidation.min_price
+        || trading.max_price != liquidation.max_price
+        || trading.expected_exponent != liquidation.expected_exponent
+    {
+        return Err(RiskError::GuardsNotOrdered);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +381,56 @@ mod tests {
             publish_time: 1_000_000,
             posted_slot: 500,
         }
+    }
+
+    /// A `posted_slot` in the future is rejected, not skipped.
+    ///
+    /// The old `if now_slot > raw.posted_slot` guard meant a future slot fell
+    /// through the entire slot check in silence — the one clock a publisher
+    /// cannot influence, validated in a single direction. Nothing covered it,
+    /// which is why changing the behaviour broke no test.
+    #[test]
+    fn a_posted_slot_from_the_future_is_rejected() {
+        let raw = fresh(12_345_000_000, 1_000);
+        // posted_slot 500, current slot 499: the account claims to have landed
+        // in a slot that has not happened.
+        assert_eq!(
+            validate_price(raw, &guards(), 1_000_000, 499).unwrap_err(),
+            RiskError::PriceFromTheFuture
+        );
+        // And the same price at the current slot is fine.
+        assert!(validate_price(raw, &guards(), 1_000_000, 500).is_ok());
+    }
+
+    #[test]
+    fn guard_ordering_accepts_the_built_in_pair_and_rejects_inversions() {
+        let trading = OracleGuards::for_trading(1, u128::MAX, -8);
+        let liquidation = OracleGuards::for_liquidation(1, u128::MAX, -8);
+        assert!(validate_guard_ordering(&trading, &liquidation).is_ok());
+
+        // Inverted: trading tolerates a staler price than liquidation, so a
+        // position could be opened at a price it cannot be liquidated against.
+        assert_eq!(
+            validate_guard_ordering(&liquidation, &trading).unwrap_err(),
+            RiskError::GuardsNotOrdered
+        );
+
+        // A looser confidence tolerance on the trading side alone is enough.
+        let mut sloppy = trading;
+        sloppy.max_confidence_bps = liquidation.max_confidence_bps + 1;
+        assert_eq!(
+            validate_guard_ordering(&sloppy, &liquidation).unwrap_err(),
+            RiskError::GuardsNotOrdered
+        );
+
+        // The sanity band describes the feed, not the tolerance: it must match
+        // exactly, in either direction.
+        let mut rebanded = trading;
+        rebanded.min_price = 2;
+        assert_eq!(
+            validate_guard_ordering(&rebanded, &liquidation).unwrap_err(),
+            RiskError::GuardsNotOrdered
+        );
     }
 
     #[test]

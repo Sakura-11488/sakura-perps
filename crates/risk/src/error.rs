@@ -40,6 +40,10 @@ pub enum RiskError {
     UnexpectedExponent,
     /// The oracle price claims to have been published in the future.
     PriceFromTheFuture,
+    /// Trading guards are looser than liquidation guards on some axis, which
+    /// would let a position open at a price the protocol will not liquidate
+    /// against.
+    GuardsNotOrdered,
 }
 
 impl core::fmt::Display for RiskError {
@@ -60,6 +64,7 @@ impl core::fmt::Display for RiskError {
             Self::PriceOutOfBand => "oracle price is outside the configured sanity band",
             Self::UnexpectedExponent => "oracle exponent differs from the qualified value",
             Self::PriceFromTheFuture => "oracle price is published in the future",
+            Self::GuardsNotOrdered => "trading guards must be no looser than liquidation guards",
         };
         f.write_str(message)
     }

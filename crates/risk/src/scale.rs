@@ -65,3 +65,42 @@ pub const SECONDS_PER_HOUR: u128 = 3_600;
 ///
 /// `10^38` is the largest power of ten below `u128::MAX` (~3.4 × 10^38).
 pub const MAX_POW10: u32 = 38;
+
+// ── Collateral base units ↔ micro-dollars ───────────────────────────────────
+//
+// The program has so far treated token base units and micro-dollars as the same
+// number. That holds for a 6-decimal mint and for no other, and
+// `Exchange.collateral_decimals` is read at runtime precisely because the mint
+// is not guaranteed to be USDC. Every crossing goes through one of these three,
+// with the rounding direction chosen deliberately at the call site rather than
+// inherited from whichever way integer division happened to fall.
+
+use crate::error::RiskError;
+use crate::math::{mul_div_ceil, mul_div_floor, pow10};
+
+/// Collateral base units → micro-dollars, rounded **down**.
+///
+/// Down because this values what a user holds: never credit more than the
+/// tokens are worth.
+pub fn quote_to_usd_floor(amount_quote: u128, collateral_decimals: u8) -> Result<u128, RiskError> {
+    let unit = pow10(collateral_decimals as u32)?;
+    mul_div_floor(amount_quote, USD_SCALE, unit)
+}
+
+/// Micro-dollars → collateral base units, rounded **down**.
+///
+/// Down because this is what the pool pays out — trader profit, collateral
+/// returned. Never pay more than the dollar figure earned.
+pub fn usd_to_quote_floor(amount_usd: u128, collateral_decimals: u8) -> Result<u128, RiskError> {
+    let unit = pow10(collateral_decimals as u32)?;
+    mul_div_floor(amount_usd, unit, USD_SCALE)
+}
+
+/// Micro-dollars → collateral base units, rounded **up**.
+///
+/// Up because this is what the pool collects — fees, margin required. Never
+/// under-collect.
+pub fn usd_to_quote_ceil(amount_usd: u128, collateral_decimals: u8) -> Result<u128, RiskError> {
+    let unit = pow10(collateral_decimals as u32)?;
+    mul_div_ceil(amount_usd, unit, USD_SCALE)
+}

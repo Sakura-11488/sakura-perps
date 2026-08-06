@@ -26,6 +26,7 @@
 
 use crate::error::RiskError;
 use crate::math::{mul_div_ceil, mul_div_floor, mul_div_i128};
+use crate::position::Side;
 use crate::scale::{RATE_SCALE, RATE_SCALE_I, SECONDS_PER_HOUR};
 
 /// One step of borrow-index accrual, with the undivided remainder to carry.
@@ -200,6 +201,28 @@ pub fn funding_owed(
     }
     let notional = i128::try_from(entry_notional_usd).map_err(|_| RiskError::MathOverflow)?;
     mul_div_i128(notional, delta, RATE_SCALE_I)
+}
+
+/// Funding owed by a position, with the sign resolved for its side.
+///
+/// Positive always means **the trader pays**, whichever side they are on. The
+/// cumulative index is maintained from the longs' perspective, so a short's
+/// obligation is its negation; performing that flip here rather than at each
+/// call site is what stops one caller getting the sign backwards and paying
+/// funding to the party that owes it.
+///
+/// Charged against entry notional, for the same reason as [`funding_owed`].
+pub fn funding_owed_signed(
+    side: Side,
+    entry_notional_usd: u128,
+    current_index: i128,
+    entry_index: i128,
+) -> Result<i128, RiskError> {
+    let owed_as_long = funding_owed(entry_notional_usd, current_index, entry_index)?;
+    Ok(match side {
+        Side::Long => owed_as_long,
+        Side::Short => owed_as_long.checked_neg().ok_or(RiskError::MathOverflow)?,
+    })
 }
 
 /// Whether the fee schedule makes funding-farming unprofitable over a period.

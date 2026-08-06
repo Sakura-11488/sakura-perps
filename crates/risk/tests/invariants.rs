@@ -19,10 +19,12 @@ use sakura_perps_risk::pool::{
     withdrawal_leaves_enough_reserve, MINIMUM_LIQUIDITY,
 };
 use sakura_perps_risk::position::{
-    blended_entry_price, equity, is_liquidatable, leverage_bps, liquidation_fee, liquidation_price,
-    margin_requirement, notional_usd, notional_usd_ceil, unrealized_pnl,
-    validate_margin_parameters, Side,
+    blended_entry_price, equity, execution_price, fee_split, is_liquidatable, leverage_bps,
+    liquidation_fee, liquidation_price, margin_requirement, notional_usd, notional_usd_ceil,
+    profit_cap_usd, settle_close, trade_fee, unrealized_pnl, validate_margin_parameters,
+    PriceDirection, Side,
 };
+use sakura_perps_risk::scale::{quote_to_usd_floor, usd_to_quote_ceil, usd_to_quote_floor};
 
 /// Prices in a range spanning a sub-cent memecoin to a five-figure asset.
 fn price() -> impl Strategy<Value = u128> {
@@ -639,6 +641,115 @@ proptest! {
     ) {
         let reserved = aum + excess;
         prop_assert!(!withdrawal_leaves_enough_reserve(aum, reserved, max_bps).unwrap());
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Execution is never better for the trader than the mid price.
+    ///
+    /// This is the whole point of the adjustment: whoever chooses to trade
+    /// through a wide confidence interval pays for it, not the pool.
+    #[test]
+    fn execution_is_never_better_than_mid(
+        mid in 1_000u128..1_000_000_000_000u128,
+        confidence in 0u128..10_000_000u128,
+        spread in 0u16..1_000,
+        long in any::<bool>(),
+        opening in any::<bool>(),
+    ) {
+        let side = if long { Side::Long } else { Side::Short };
+        let direction = if opening { PriceDirection::Open } else { PriceDirection::Close };
+        let Ok(price) = execution_price(side, direction, mid, confidence, spread) else {
+            return Ok(()); // refused (adverse >= mid) is a valid outcome
+        };
+        let pays_up = matches!(
+            (side, direction),
+            (Side::Long, PriceDirection::Open) | (Side::Short, PriceDirection::Close)
+        );
+        if pays_up {
+            prop_assert!(price >= mid, "buying must not execute below mid");
+        } else {
+            prop_assert!(price <= mid, "selling must not execute above mid");
+            prop_assert!(price > 0, "a zero execution price makes the position unvaluable");
+        }
+    }
+
+    /// A fee split re-sums to exactly the fee. No dust minted, none lost.
+    #[test]
+    fn a_fee_split_conserves_the_fee(fee in 0u128..1_000_000_000_000u128, share in bps()) {
+        let split = fee_split(fee, share).unwrap();
+        prop_assert_eq!(split.protocol_usd + split.lp_usd, fee);
+    }
+
+    /// Closing never pays a fee larger than the payout it is taken from, and
+    /// never reports both a payout and bad debt.
+    #[test]
+    fn settle_close_is_internally_consistent(
+        collateral in 0u128..1_000_000_000u128,
+        reserve in 0u128..1_000_000_000u128,
+        equity_usd in -1_000_000_000i128..1_000_000_000i128,
+        close_fee in 0u128..10_000_000u128,
+        decimals in 0u8..=12,
+    ) {
+        let s = settle_close(collateral, reserve, equity_usd, close_fee, decimals).unwrap();
+
+        prop_assert!(s.close_fee_quote <= s.gross_payout_quote);
+        prop_assert_eq!(s.net_payout_quote, s.gross_payout_quote - s.close_fee_quote);
+        // Payout and bad debt are mutually exclusive: one branch or the other.
+        prop_assert!(s.bad_debt_usd == 0 || s.gross_payout_quote == 0);
+        if equity_usd <= 0 {
+            prop_assert_eq!(s.bad_debt_usd, equity_usd.unsigned_abs());
+            prop_assert_eq!(s.gross_payout_quote, 0);
+        } else {
+            // The cap binds exactly when it is reported to.
+            prop_assert!(s.gross_payout_quote <= collateral + reserve);
+            let uncapped = usd_to_quote_floor(equity_usd as u128, decimals).unwrap();
+            prop_assert_eq!(s.profit_capped, uncapped > collateral + reserve);
+        }
+    }
+
+    /// The pool never pays more than collateral plus the reserve it snapshotted,
+    /// however large the win. This is the number `open_position` reserves
+    /// against, so if it could be exceeded the reserve would not be a bound.
+    #[test]
+    fn the_pool_never_pays_beyond_the_snapshotted_reserve(
+        collateral in 0u128..1_000_000u128,
+        reserve in 0u128..1_000_000u128,
+        windfall in 0i128..1_000_000_000_000i128,
+        decimals in 0u8..=9,
+    ) {
+        let s = settle_close(collateral, reserve, windfall, 0, decimals).unwrap();
+        prop_assert!(s.gross_payout_quote <= collateral + reserve);
+    }
+
+    /// Fees and profit caps round the way the policy says: fees up, caps down.
+    #[test]
+    fn fee_rounds_up_and_profit_cap_rounds_down(
+        notional in 0u128..1_000_000_000_000u128,
+        rate in bps(),
+    ) {
+        let fee = trade_fee(notional, rate).unwrap();
+        let cap = profit_cap_usd(notional, rate).unwrap();
+        let exact_num = notional * rate as u128;
+        prop_assert_eq!(fee, exact_num.div_ceil(10_000));
+        prop_assert_eq!(cap, exact_num / 10_000);
+        prop_assert!(fee >= cap, "the same rate must never collect less than it caps");
+    }
+
+    /// Crossing into micro-dollars and back never invents value: the round trip
+    /// through the pool-favouring floor can only lose dust, never gain it.
+    #[test]
+    fn quote_usd_conversion_never_creates_value(
+        amount in 0u128..1_000_000_000_000u128,
+        decimals in 0u8..=12,
+    ) {
+        let usd = quote_to_usd_floor(amount, decimals).unwrap();
+        let back = usd_to_quote_floor(usd, decimals).unwrap();
+        prop_assert!(back <= amount, "a round trip must not manufacture collateral");
+        // And the ceiling form is never below the floor form.
+        prop_assert!(usd_to_quote_ceil(usd, decimals).unwrap() >= back);
     }
 }
 

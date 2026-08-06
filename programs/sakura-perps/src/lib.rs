@@ -477,6 +477,8 @@ pub enum PerpsError {
     EmptyPool,
     #[msg("Initial margin must exceed maintenance margin plus liquidation fee.")]
     InvalidMarginParameters,
+    #[msg("Trading guards must be no looser than liquidation guards.")]
+    GuardsNotOrdered,
 
     // ── Pool and vault ──────────────────────────────────────────────────────
     #[msg("Only the exchange admin may do this.")]

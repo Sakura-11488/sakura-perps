@@ -330,6 +330,193 @@ pub fn liquidation_fee(
     Ok(fee.min(collateral_remaining_usd))
 }
 
+/// Whether a price is being struck to open a position or to close one.
+///
+/// The direction matters because the adverse side flips: opening a long and
+/// closing a short both pay *up*; opening a short and closing a long both
+/// receive *down*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PriceDirection {
+    /// Striking the entry price of a new position.
+    Open,
+    /// Striking the exit price of an existing one.
+    Close,
+}
+
+/// The price a trade actually executes at — never better for the trader than
+/// `mid`.
+///
+/// Two adjustments, both applied against the trader:
+///
+/// * **Confidence.** The oracle publishes an interval, not a point. Treating the
+///   midpoint as truth hands the trader the benefit of that uncertainty; taking
+///   the adverse edge means a wide interval costs the person who chose to trade
+///   through it rather than the pool.
+/// * **Spread.** The venue's own charge for immediacy.
+///
+/// Rounding follows the house rule: up when the trader pays, down when the
+/// trader receives.
+pub fn execution_price(
+    side: Side,
+    direction: PriceDirection,
+    mid: u128,
+    confidence: u128,
+    spread_bps: u16,
+) -> Result<u128, RiskError> {
+    if mid == 0 {
+        return Err(RiskError::InvalidPrice);
+    }
+    if spread_bps as u128 > BPS_DENOMINATOR {
+        return Err(RiskError::InvalidBasisPoints);
+    }
+
+    // A long pays on the way in and receives on the way out; a short mirrors it.
+    // `pays_up` is true exactly when the adverse direction is upward.
+    let pays_up = matches!(
+        (side, direction),
+        (Side::Long, PriceDirection::Open) | (Side::Short, PriceDirection::Close)
+    );
+
+    let spread = if pays_up {
+        mul_div_ceil(mid, spread_bps as u128, BPS_DENOMINATOR)?
+    } else {
+        mul_div_floor(mid, spread_bps as u128, BPS_DENOMINATOR)?
+    };
+
+    if pays_up {
+        mid.checked_add(confidence)
+            .and_then(|p| p.checked_add(spread))
+            .ok_or(RiskError::MathOverflow)
+    } else {
+        let adverse = confidence
+            .checked_add(spread)
+            .ok_or(RiskError::MathOverflow)?;
+        // Never zero or negative: a zero execution price makes notional zero and
+        // the position unvaluable, which is worse than refusing the trade.
+        if adverse >= mid {
+            return Err(RiskError::InvalidPrice);
+        }
+        Ok(mid - adverse)
+    }
+}
+
+/// Fee on a notional, in basis points, rounded **up** — the pool never
+/// under-collects.
+pub fn trade_fee(notional_usd: u128, fee_bps: u16) -> Result<u128, RiskError> {
+    if fee_bps as u128 > BPS_DENOMINATOR {
+        return Err(RiskError::InvalidBasisPoints);
+    }
+    mul_div_ceil(notional_usd, fee_bps as u128, BPS_DENOMINATOR)
+}
+
+/// How a collected fee divides between the protocol and the liquidity pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeSplit {
+    /// The protocol treasury's share, floored.
+    pub protocol_usd: u128,
+    /// The liquidity pool's share, which absorbs the rounding remainder.
+    pub lp_usd: u128,
+}
+
+/// Split a fee, with the remainder going to the **pool**.
+///
+/// The protocol share is floored and the pool takes the rest, so the two parts
+/// re-sum to exactly `fee_usd` — no dust is minted, and none is lost.
+pub fn fee_split(fee_usd: u128, protocol_share_bps: u16) -> Result<FeeSplit, RiskError> {
+    if protocol_share_bps as u128 > BPS_DENOMINATOR {
+        return Err(RiskError::InvalidBasisPoints);
+    }
+    let protocol_usd = mul_div_floor(fee_usd, protocol_share_bps as u128, BPS_DENOMINATOR)?;
+    let lp_usd = fee_usd
+        .checked_sub(protocol_usd)
+        .ok_or(RiskError::MathOverflow)?;
+    Ok(FeeSplit {
+        protocol_usd,
+        lp_usd,
+    })
+}
+
+/// The most the pool will ever pay a position, as a fraction of its **entry
+/// notional** — floored.
+///
+/// Of entry notional rather than of collateral: the cap bounds what the pool
+/// underwrites, and collateral is the trader's own money. Snapshotting it per
+/// position at open is what lets the reserve be exact.
+pub fn profit_cap_usd(entry_notional_usd: u128, max_profit_bps: u16) -> Result<u128, RiskError> {
+    if max_profit_bps as u128 > BPS_DENOMINATOR {
+        return Err(RiskError::InvalidBasisPoints);
+    }
+    mul_div_floor(entry_notional_usd, max_profit_bps as u128, BPS_DENOMINATOR)
+}
+
+/// The outcome of closing a position, in collateral base units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloseSettlement {
+    /// Equity owed after the profit cap, before the close fee.
+    pub gross_payout_quote: u128,
+    /// Charged on the way out, never more than the gross payout.
+    pub close_fee_quote: u128,
+    /// What the owner actually receives.
+    pub net_payout_quote: u128,
+    /// Shortfall the pool absorbs when equity is non-positive. Recorded in M5,
+    /// never socialised.
+    pub bad_debt_usd: u128,
+    /// Whether the profit cap bound. Worth surfacing: a capped close pays less
+    /// than the equity a trader can compute for themselves.
+    pub profit_capped: bool,
+}
+
+/// Resolve a close into payout, fee and bad debt.
+///
+/// The profit cap applies to **gross equity, before** the close fee. Applying it
+/// afterwards would let the fee push a capped payout below the cap, making
+/// "the fee never exceeds the payout" and "the cap binds" contradict each other.
+///
+/// The insolvent branch computes bad debt with an explicit `unsigned_abs`, not a
+/// saturating subtraction. Saturating arithmetic is banned repo-wide, and a
+/// missing clamp here would make a worthless position permanently *unclosable*
+/// rather than merely worthless.
+pub fn settle_close(
+    collateral_quote: u128,
+    reserve_quote: u128,
+    equity_usd: i128,
+    close_fee_usd: u128,
+    collateral_decimals: u8,
+) -> Result<CloseSettlement, RiskError> {
+    if equity_usd <= 0 {
+        return Ok(CloseSettlement {
+            gross_payout_quote: 0,
+            close_fee_quote: 0,
+            net_payout_quote: 0,
+            bad_debt_usd: equity_usd.unsigned_abs(),
+            profit_capped: false,
+        });
+    }
+
+    let equity_quote = crate::scale::usd_to_quote_floor(equity_usd as u128, collateral_decimals)?;
+    let cap = collateral_quote
+        .checked_add(reserve_quote)
+        .ok_or(RiskError::MathOverflow)?;
+    let profit_capped = equity_quote > cap;
+    let gross_payout_quote = equity_quote.min(cap);
+
+    // The fee cannot exceed the payout: there is nothing else to take it from,
+    // and a position must never close owing money it has already surrendered.
+    let close_fee_quote =
+        crate::scale::usd_to_quote_ceil(close_fee_usd, collateral_decimals)?.min(gross_payout_quote);
+    let net_payout_quote = gross_payout_quote
+        .checked_sub(close_fee_quote)
+        .ok_or(RiskError::MathOverflow)?;
+
+    Ok(CloseSettlement {
+        gross_payout_quote,
+        close_fee_quote,
+        net_payout_quote,
+        bad_debt_usd: 0,
+        profit_capped,
+    })
+}
+
 /// Leverage implied by a notional and equity, in basis points.
 ///
 /// Returns `None` for non-positive equity, where leverage is undefined rather

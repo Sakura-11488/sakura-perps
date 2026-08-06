@@ -96,6 +96,7 @@ pub fn map_risk_error(err: RiskError) -> Error {
         RiskError::InvalidBasisPoints => error!(PerpsError::InvalidBasisPoints),
         RiskError::EmptyPool => error!(PerpsError::EmptyPool),
         RiskError::InvalidMarginParameters => error!(PerpsError::InvalidMarginParameters),
+        RiskError::GuardsNotOrdered => error!(PerpsError::GuardsNotOrdered),
     }
 }
 
