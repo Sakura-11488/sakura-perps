@@ -38,14 +38,18 @@ use anchor_spl::token_interface::Mint;
 use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
 use sakura_perps_risk::oracle::OracleGuards;
 
+pub mod market;
 pub mod oracle;
 pub mod pool;
+pub mod position;
 
 // Glob re-export, not a narrow import. `#[program]` generates references to
 // `crate::__client_accounts_*` for every Accounts struct, so those macro-made
 // modules have to be visible at the crate root even though the structs
-// themselves live in `pool`.
+// themselves live in `pool`, `market` or `position`.
+pub use crate::market::*;
 pub use crate::pool::*;
+pub use crate::position::*;
 
 declare_id!("5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y");
 

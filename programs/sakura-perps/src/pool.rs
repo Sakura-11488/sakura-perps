@@ -106,7 +106,14 @@ pub struct Pool {
     /// Hard cap on `quote_deposited`. Essential on the way to mainnet: it bounds
     /// what can be lost while the protocol is still unproven.
     pub max_aum_quote: u64,
-    pub _reserved: [u8; 128],
+    /// `MINIMUM_LIQUIDITY` in this pool's collateral base units.
+    ///
+    /// Taken from `_reserved` rather than appended, so `INIT_SPACE` is unchanged
+    /// and no existing pool needs reallocating. The live devnet pool reads `0`
+    /// here, which is inert: the only branch that consumes it is the
+    /// `total_shares == 0` first-deposit path, which that pool is long past.
+    pub min_liquidity_quote: u64,
+    pub _reserved: [u8; 120],
 }
 
 /// A pending withdrawal. Created by `request_withdraw`, consumed by `lp_withdraw`.
