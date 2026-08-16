@@ -436,6 +436,44 @@ pub fn fee_split(fee_usd: u128, protocol_share_bps: u16) -> Result<FeeSplit, Ris
     })
 }
 
+/// [`FeeSplit`], in collateral base units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeSplitQuote {
+    /// The protocol treasury's share, floored.
+    pub protocol_quote: u128,
+    /// The liquidity pool's share, which absorbs the rounding remainder.
+    pub lp_quote: u128,
+}
+
+/// Split a fee the vault has **already retained**, in collateral base units.
+///
+/// Delegates to [`fee_split`]: taking basis points of a `u128` and handing the
+/// remainder to the pool is unit-agnostic, so the delegation is exact and the
+/// two parts re-sum to precisely `fee_quote`.
+///
+/// The wrapper exists for one reason, and it is not tidiness. The pool books
+/// fee revenue in base units, and the only base-unit fee figures that are safe
+/// to book are the ones a settlement actually kept — `close_fee_quote` and
+/// `liquidation_fee_quote`, both of which are clamped against the payout.
+/// Booking the *pre-clamp* USD figure a fee was computed from credits the pool
+/// money the vault never received, which pushes recorded liabilities above the
+/// vault balance and makes the solvency assertion revert the close. The
+/// position is then permanently unclosable, and in a milestone with no keeper
+/// liquidation there is no second way out.
+///
+/// Sharing a signature with [`fee_split`] is what made that mistake type-check.
+/// This function does not: a USD amount reaching it is a name that reads wrong.
+pub fn fee_split_quote(
+    fee_quote: u128,
+    protocol_share_bps: u16,
+) -> Result<FeeSplitQuote, RiskError> {
+    let split = fee_split(fee_quote, protocol_share_bps)?;
+    Ok(FeeSplitQuote {
+        protocol_quote: split.protocol_usd,
+        lp_quote: split.lp_usd,
+    })
+}
+
 /// The most the pool will ever pay a position, as a fraction of its **entry
 /// notional** — floored.
 ///
@@ -517,6 +555,76 @@ pub fn settle_close(
     })
 }
 
+/// A [`CloseSettlement`] with a liquidation fee taken out of it.
+///
+/// The four base-unit fields re-sum by construction:
+/// `gross_payout_quote == close_fee_quote + liquidation_fee_quote +
+/// net_payout_quote`. That equality is what the pool's solvency argument rests
+/// on, so it is a property of the type rather than of its callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiquidatedSettlement {
+    /// Unchanged from the settlement this was derived from.
+    pub gross_payout_quote: u128,
+    /// Unchanged from the settlement this was derived from.
+    pub close_fee_quote: u128,
+    /// Charged after the close fee, and never more than the close fee left.
+    pub liquidation_fee_quote: u128,
+    /// What the owner actually receives. **This** is the amount an admin
+    /// settlement transfers, not the settlement's own `net_payout_quote`, which
+    /// is gross minus the close fee only.
+    pub net_payout_quote: u128,
+    /// Carried through from the settlement: the ledger books it either way.
+    pub bad_debt_usd: u128,
+    /// Carried through from the settlement: the close event reports it.
+    pub profit_capped: bool,
+}
+
+/// Take a liquidation fee out of a settled close.
+///
+/// One place, one clamp, one ordering — **close fee first, liquidation fee out
+/// of what is left** — so the admin-settlement path and the ledger that follows
+/// it cannot disagree about which number was charged.
+///
+/// The clamp is the point. [`liquidation_fee`] caps the fee against the
+/// position's *collateral*, and nothing there relates it to the payout: in the
+/// ordinary late-liquidation case, where equity has decayed to a few dollars
+/// while the fee is still computed on full notional, the fee exceeds the payout
+/// and the transfer underflows. The position then cannot be liquidated at all,
+/// on the only liquidation path this milestone ships. Clamping mirrors
+/// [`settle_close`]'s own clamp for the same stated reason: there is nothing
+/// else to take the fee from.
+///
+/// A settlement whose close fee already exceeds its gross payout is not clamped
+/// but rejected — [`settle_close`] cannot produce one, so it means the caller
+/// built a settlement by hand and got it wrong, and silently absorbing that
+/// would hide the corruption rather than the fee.
+pub fn apply_liquidation_fee(
+    settlement: CloseSettlement,
+    liq_fee_usd: u128,
+    collateral_decimals: u8,
+) -> Result<LiquidatedSettlement, RiskError> {
+    let after_close_fee = settlement
+        .gross_payout_quote
+        .checked_sub(settlement.close_fee_quote)
+        .ok_or(RiskError::MathOverflow)?;
+
+    let liquidation_fee_quote =
+        crate::scale::usd_to_quote_ceil(liq_fee_usd, collateral_decimals)?.min(after_close_fee);
+
+    let net_payout_quote = after_close_fee
+        .checked_sub(liquidation_fee_quote)
+        .ok_or(RiskError::MathOverflow)?;
+
+    Ok(LiquidatedSettlement {
+        gross_payout_quote: settlement.gross_payout_quote,
+        close_fee_quote: settlement.close_fee_quote,
+        liquidation_fee_quote,
+        net_payout_quote,
+        bad_debt_usd: settlement.bad_debt_usd,
+        profit_capped: settlement.profit_capped,
+    })
+}
+
 /// Leverage implied by a notional and equity, in basis points.
 ///
 /// Returns `None` for non-positive equity, where leverage is undefined rather
@@ -532,4 +640,162 @@ pub fn leverage_bps(notional_usd: u128, equity_usd: i128) -> Result<Option<u128>
             .ok_or(RiskError::MathOverflow)?,
         equity,
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Six-decimal collateral, i.e. USDC. At six decimals `usd_to_quote_*` is
+    /// the identity, which is exactly why the fee-split bug was invisible: the
+    /// wrong number had the right magnitude.
+    const D: u8 = 6;
+
+    // ── fee_split_quote ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fee_split_quote_re_sums_exactly() {
+        for fee in [0u128, 1, 2, 3, 7, 999, 1_000, 1_000_001, u128::MAX / 2] {
+            for bps in [0u16, 1, 2_500, 3_000, 9_999, 10_000] {
+                let split = fee_split_quote(fee, bps).expect("in range");
+                assert_eq!(
+                    split.protocol_quote.checked_add(split.lp_quote),
+                    Some(fee),
+                    "fee={fee} bps={bps}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fee_split_quote_floors_the_protocol_share() {
+        // 1 unit at 50% is the sharpest rounding case there is: the protocol
+        // floors to zero and the pool keeps the whole unit.
+        let split = fee_split_quote(1, 5_000).expect("in range");
+        assert_eq!(split.protocol_quote, 0);
+        assert_eq!(split.lp_quote, 1);
+    }
+
+    #[test]
+    fn fee_split_quote_agrees_with_fee_split() {
+        // The delegation is the whole implementation, so the test that matters
+        // is that it stays a delegation and not a re-derivation.
+        for fee in [0u128, 1, 12_345, 1_000_000] {
+            for bps in [0u16, 1_234, 10_000] {
+                let usd = fee_split(fee, bps).expect("in range");
+                let quote = fee_split_quote(fee, bps).expect("in range");
+                assert_eq!(quote.protocol_quote, usd.protocol_usd);
+                assert_eq!(quote.lp_quote, usd.lp_usd);
+            }
+        }
+    }
+
+    #[test]
+    fn fee_split_quote_rejects_a_share_above_one_hundred_percent() {
+        assert_eq!(
+            fee_split_quote(100, 10_001),
+            Err(RiskError::InvalidBasisPoints)
+        );
+    }
+
+    // ── apply_liquidation_fee — B3 ──────────────────────────────────────────
+
+    fn assert_re_sums(settled: &LiquidatedSettlement) {
+        assert_eq!(
+            settled
+                .close_fee_quote
+                .checked_add(settled.liquidation_fee_quote)
+                .and_then(|v| v.checked_add(settled.net_payout_quote)),
+            Some(settled.gross_payout_quote),
+            "{settled:?}"
+        );
+    }
+
+    #[test]
+    fn liquidation_fee_on_a_zero_payout_takes_nothing() {
+        // The insolvent close: equity is gone, so is the payout, and the fee
+        // has nothing to come out of. Charging it anyway underflows the
+        // transfer and makes the position permanently unliquidatable.
+        let settlement = settle_close(1_000_000, 0, -5_000_000, 10_000, D).expect("settles");
+        assert_eq!(settlement.gross_payout_quote, 0);
+
+        let settled = apply_liquidation_fee(settlement, 50_000_000, D).expect("clamps");
+        assert_eq!(settled.liquidation_fee_quote, 0);
+        assert_eq!(settled.net_payout_quote, 0);
+        assert_re_sums(&settled);
+    }
+
+    #[test]
+    fn liquidation_fee_is_zero_when_the_close_fee_took_everything() {
+        // close_fee_quote == gross_payout_quote: settle_close's own clamp bound,
+        // so there is no headroom left and the liquidation fee must be zero
+        // rather than pushing the net negative.
+        let settlement = settle_close(2, 0, 2, 1_000_000_000, D).expect("settles");
+        assert_eq!(settlement.close_fee_quote, settlement.gross_payout_quote);
+
+        let settled = apply_liquidation_fee(settlement, 1_000_000, D).expect("clamps");
+        assert_eq!(settled.liquidation_fee_quote, 0);
+        assert_eq!(settled.net_payout_quote, 0);
+        assert_re_sums(&settled);
+    }
+
+    #[test]
+    fn liquidation_fee_larger_than_the_payout_is_clamped_to_the_headroom() {
+        // The ordinary late liquidation: a few dollars of equity left, a fee
+        // computed on the full original notional. This is the case the missing
+        // clamp broke, and it is not an edge case.
+        let settlement = settle_close(10_000_000, 0, 3_000_000, 0, D).expect("settles");
+        assert_eq!(settlement.gross_payout_quote, 3_000_000);
+        assert_eq!(settlement.close_fee_quote, 0);
+
+        let settled = apply_liquidation_fee(settlement, 900_000_000, D).expect("clamps");
+        assert_eq!(settled.liquidation_fee_quote, 3_000_000);
+        assert_eq!(settled.net_payout_quote, 0);
+        assert_re_sums(&settled);
+    }
+
+    #[test]
+    fn liquidation_fee_below_the_headroom_is_charged_in_full_and_rounds_up() {
+        let settlement = settle_close(10_000_000, 0, 4_000_000, 1_000_000, D).expect("settles");
+        assert_eq!(settlement.gross_payout_quote, 4_000_000);
+        assert_eq!(settlement.close_fee_quote, 1_000_000);
+
+        let settled = apply_liquidation_fee(settlement, 500_000, D).expect("charges");
+        assert_eq!(settled.liquidation_fee_quote, 500_000);
+        assert_eq!(settled.net_payout_quote, 2_500_000);
+        assert_re_sums(&settled);
+    }
+
+    #[test]
+    fn liquidation_fee_carries_bad_debt_and_the_profit_cap_through() {
+        // §4.2 books `bad_debt_usd` and the close event reports `profit_capped`
+        // on the admin path too, so dropping either here loses it silently.
+        let insolvent = settle_close(1_000_000, 0, -7, 0, D).expect("settles");
+        let settled = apply_liquidation_fee(insolvent, 0, D).expect("clamps");
+        assert_eq!(settled.bad_debt_usd, 7);
+
+        // reserve 0, so equity above collateral is capped and the flag is set.
+        let capped = settle_close(1_000_000, 0, 9_000_000, 0, D).expect("settles");
+        assert!(capped.profit_capped);
+        let settled = apply_liquidation_fee(capped, 0, D).expect("clamps");
+        assert!(settled.profit_capped);
+        assert_re_sums(&settled);
+    }
+
+    #[test]
+    fn a_settlement_whose_close_fee_exceeds_its_gross_is_rejected_not_absorbed() {
+        // settle_close cannot produce this. Reaching it means a hand-built
+        // settlement, and absorbing it would hide the corruption.
+        let corrupt = CloseSettlement {
+            gross_payout_quote: 10,
+            close_fee_quote: 11,
+            net_payout_quote: 0,
+            bad_debt_usd: 0,
+            profit_capped: false,
+        };
+        assert_eq!(
+            apply_liquidation_fee(corrupt, 0, D),
+            Err(RiskError::MathOverflow)
+        );
+    }
 }

@@ -157,7 +157,11 @@ async function main() {
         // the whole point of the two-step withdraw in production — this proves
         // the mechanism, not the timing.
         withdrawDelaySeconds: 0,
-        maxUtilizationBps: 8_000,
+        // M5_MAX_UTILIZATION_BPS. Anything above it is now refused by
+        // initialize_pool: the ceiling is the protocol's bound on how far an LP
+        // share price can be overstated, so it is enforced where the pool is
+        // created and not only where it is later retuned.
+        maxUtilizationBps: 2_000,
         maxAumQuote: new anchor.BN('1000000000000'), // 1,000,000 USDC
       })
       .accounts({ admin, collateralMint: USDC_DEVNET, tokenProgram: TOKEN_PROGRAM_ID })

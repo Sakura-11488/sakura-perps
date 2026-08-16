@@ -25,3 +25,4 @@ id.json
 keys/
 *.pem
 target-189/
+target-189-clippy/

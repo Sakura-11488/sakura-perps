@@ -14,6 +14,13 @@
 //! somebody transferring tokens directly into the vault is harmless rather than
 //! a panic — see the next section for why that matters more than it sounds.
 //!
+//! It is the first of four, and [`assert_pool_invariants`] is the single place
+//! they are all checked. The other three bound the reserve against tracked
+//! equity, bound a market's slice by the pool's total, and tie a market's
+//! position counters to its open interest. Every vault-touching instruction —
+//! in this module and in the position instructions built on it — ends with that
+//! one call, after `emit!` and after reloading the vault.
+//!
 //! # AUM is a tracked number, never the vault balance
 //!
 //! The single most important line in this module is the one that is *absent*:
@@ -45,10 +52,10 @@
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
-use sakura_perps_risk::math::to_u64;
+use sakura_perps_risk::math::{cmp_products, to_u64};
 use sakura_perps_risk::pool as risk_pool;
 
-use crate::{Exchange, PauseFlags, PerpsError};
+use crate::{Exchange, Market, PauseFlags, PerpsError};
 
 /// Decimals for the LP share mint.
 ///
@@ -70,6 +77,24 @@ pub const MAX_FLOW_FEE_BPS: u16 = 200;
 /// admin cannot lock the pool indefinitely without it being an obvious
 /// parameter change.
 pub const MAX_WITHDRAW_DELAY_SECONDS: u32 = 24 * 60 * 60;
+
+/// Hard ceiling on `pool.max_utilization_bps`: 20%.
+///
+/// This constant is milestone 5's entire answer to the LP share-pricing
+/// question, and it is a **bound rather than a fix**. Share price comes off
+/// `pool.quote_deposited`, which does not mark open positions to market, so it
+/// can overstate what a share is worth. The overstatement is bounded by what is
+/// reserved against those positions, and `reserved_quote / quote_deposited` is
+/// exactly what this caps. So the worst-case mispricing, as a fraction of AUM,
+/// **is** `max_utilization_bps`.
+///
+/// The alternative — computing the pool's true liability — was designed and
+/// then deleted for cause. That liability is `Σ max(0, min(equity_i, cap_i))`,
+/// and `max` and `min` do not commute with summation, so no aggregate over
+/// summed size and summed entry notional can produce it. A milestone can have
+/// an unsound estimate or no estimate; this one takes no estimate and records
+/// the choice so it is not silently revisited.
+pub const M5_MAX_UTILIZATION_BPS: u16 = 2_000;
 
 /// The shared liquidity pool.
 #[account]
@@ -101,19 +126,23 @@ pub struct Pool {
     pub withdraw_fee_bps: u16,
     /// Seconds between requesting a withdrawal and being able to execute it.
     pub withdraw_delay_seconds: u32,
-    /// Utilisation ceiling a withdrawal may not push the pool past.
+    /// Utilisation ceiling. Bounded by [`M5_MAX_UTILIZATION_BPS`] at both the
+    /// instruction that writes it and the one that created the pool.
     pub max_utilization_bps: u16,
     /// Hard cap on `quote_deposited`. Essential on the way to mainnet: it bounds
     /// what can be lost while the protocol is still unproven.
     pub max_aum_quote: u64,
-    /// `MINIMUM_LIQUIDITY` in this pool's collateral base units.
+    /// 128 originally, then 120 while a `min_liquidity_quote: u64` sat here.
     ///
-    /// Taken from `_reserved` rather than appended, so `INIT_SPACE` is unchanged
-    /// and no existing pool needs reallocating. The live devnet pool reads `0`
-    /// here, which is inert: the only branch that consumes it is the
-    /// `total_shares == 0` first-deposit path, which that pool is long past.
-    pub min_liquidity_quote: u64,
-    pub _reserved: [u8; 120],
+    /// Those eight bytes were returned to the reserve rather than left
+    /// declared-and-unused. The field was never written and never read: the real
+    /// floor is [`sakura_perps_risk::pool::MINIMUM_LIQUIDITY`], a crate constant
+    /// consumed inside `shares_for_deposit`. A field whose name promises a
+    /// configurable minimum that does not exist is worse than no field at all —
+    /// an operator sets it, observes nothing, and concludes the floor is off.
+    /// `INIT_SPACE` is unchanged, and the live devnet pool already reads zero in
+    /// those bytes, so nothing changes on chain.
+    pub _reserved: [u8; 128],
 }
 
 /// A pending withdrawal. Created by `request_withdraw`, consumed by `lp_withdraw`.
@@ -134,6 +163,11 @@ pub struct WithdrawRequest {
     pub requested_slot: u64,
     pub _reserved: [u8; 64],
 }
+
+// Frozen: there is a live devnet pool, and Anchor has no migration story. Stage
+// 3 adds no field to either of these, and this is what keeps that true.
+const _: () = assert!(Pool::INIT_SPACE == 252);
+const _: () = assert!(WithdrawRequest::INIT_SPACE == 121);
 
 /// Arguments to [`crate::sakura_perps::initialize_pool`].
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -157,12 +191,16 @@ pub fn handle_initialize_pool(
         params.withdraw_delay_seconds <= MAX_WITHDRAW_DELAY_SECONDS,
         PerpsError::WithdrawDelayTooLong
     );
-    // Strictly below 100%: a ceiling equal to AUM permits reserving every asset
-    // the pool has, leaving nothing to absorb the next adverse move, and it is
-    // the boundary the floored-utilisation comparison used to leak through.
+    // The same predicate `set_pool_limits` enforces, and for the same reason:
+    // `max_utilization_bps` **is** this milestone's bound on how far an LP share
+    // price can be overstated, so a ceiling settable here but not there would
+    // mean the bound held only for pools whose admin happened to call the
+    // setter. A pool created at 9 999 bps admits reserving essentially every
+    // asset it has, which is not a ceiling — and no later instruction forces a
+    // correction, because nothing lowers the field on its own.
     require!(
-        params.max_utilization_bps < crate::BPS_DENOMINATOR,
-        PerpsError::InvalidBasisPoints
+        params.max_utilization_bps > 0 && params.max_utilization_bps <= M5_MAX_UTILIZATION_BPS,
+        PerpsError::UtilizationCeilingTooHigh
     );
 
     let pool = &mut ctx.accounts.pool;
@@ -231,6 +269,15 @@ pub fn handle_lp_deposit(ctx: Context<LpDeposit>, amount: u64, min_shares_out: u
     require!(received > 0, PerpsError::ZeroAmount);
 
     let pool = &mut ctx.accounts.pool;
+    // Snapshotted before anything moves, for I2's monotone form. A deposit
+    // raises `quote_deposited` and never touches `reserved_quote`, so it can
+    // only lower utilisation — and it must not be blocked by a ceiling an admin
+    // lowered, because it is one of only two actions that bring the pool back
+    // under one.
+    let utilisation_before = UtilisationCheck::NotWorsened {
+        reserved_quote: pool.reserved_quote,
+        quote_deposited: pool.quote_deposited,
+    };
 
     // Fee comes off the top, and rounds up: the pool never under-collects.
     let fee = to_u64(
@@ -324,7 +371,7 @@ pub fn handle_lp_deposit(ctx: Context<LpDeposit>, amount: u64, min_shares_out: u
         quote_deposited: pool.quote_deposited,
     });
 
-    assert_vault_solvent(&ctx.accounts.quote_vault, pool)
+    assert_pool_invariants(&ctx.accounts.quote_vault, pool, None, utilisation_before)
 }
 
 pub fn handle_request_withdraw(ctx: Context<RequestWithdraw>, shares: u64) -> Result<()> {
@@ -527,21 +574,194 @@ pub fn handle_lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Resu
     });
 
     ctx.accounts.quote_vault.reload()?;
-    assert_vault_solvent(&ctx.accounts.quote_vault, pool)
+    // The ceiling, absolutely. A withdrawal removes the very equity the reserve
+    // is measured against, so it is one of the two paths that can raise
+    // utilisation and one of the two that must be gated on the value in force.
+    assert_pool_invariants(
+        &ctx.accounts.quote_vault,
+        pool,
+        None,
+        UtilisationCheck::Ceiling,
+    )
 }
 
-/// The invariant from the module docs, asserted for real.
+/// What the pool has recorded that it owes: liquidity-provider equity, trader
+/// collateral held on their behalf, and fees owed to the recipient.
 ///
-/// A comment claiming an invariant holds is a hope. This is the check.
-fn assert_vault_solvent(vault: &InterfaceAccount<'_, TokenAccount>, pool: &Pool) -> Result<()> {
-    let liabilities = pool
-        .quote_deposited
+/// `reserved_quote` is deliberately absent. A reserve is a *claim against*
+/// liquidity-provider equity, not a liability on top of it, so including it
+/// would double-count and make a solvent pool look insolvent.
+pub(crate) fn liabilities(pool: &Pool) -> Result<u64> {
+    pool.quote_deposited
         .checked_add(pool.locked_quote)
         .and_then(|value| value.checked_add(pool.pending_protocol_fees))
-        .ok_or(PerpsError::MathOverflow)?;
+        .ok_or(PerpsError::MathOverflow.into())
+}
 
-    require!(vault.amount >= liabilities, PerpsError::VaultInsolvent);
+/// I1, over a balance rather than an account, so a host test can reach it.
+///
+/// A comment claiming an invariant holds is a hope. This is the check.
+pub(crate) fn assert_solvent(vault_amount: u64, pool: &Pool) -> Result<()> {
+    require!(
+        vault_amount >= liabilities(pool)?,
+        PerpsError::VaultInsolvent
+    );
     Ok(())
+}
+
+fn assert_vault_solvent(vault: &InterfaceAccount<'_, TokenAccount>, pool: &Pool) -> Result<()> {
+    assert_solvent(vault.amount, pool)
+}
+
+/// Which form of I2 an instruction is entitled to be judged by.
+///
+/// The distinction is not a convenience, it is a correctness requirement, and
+/// getting it wrong bricks the protocol. `max_utilization_bps` may legitimately
+/// be lowered below current utilisation — §3.9.1 permits it, and the setter caps
+/// at [`M5_MAX_UTILIZATION_BPS`], so a pool whose ceiling was previously higher
+/// cannot be raised back out of that state. Asserting the ceiling **absolutely**
+/// at the end of every value-touching instruction then reverts *every close*,
+/// including `emergency_close_position`, and reverts `lp_deposit` too — which is
+/// the only other action that lowers utilisation. Every position and all
+/// liquidity-provider equity is trapped, permanently, with no admin action and
+/// no permissionless action that recovers it.
+///
+/// That is the exact failure mode the module docs warn about for I4 — "an
+/// unconditionally-asserted falsified invariant bricks every instruction that
+/// asserts it, including `close_position`" — reintroduced through I2.
+///
+/// So the ceiling binds where utilisation can **rise**, and everywhere else the
+/// weaker monotone form applies: an instruction may not make utilisation worse
+/// than it found it. The two coincide whenever the pool is already inside its
+/// ceiling, which is every state reachable without an admin lowering it.
+pub(crate) enum UtilisationCheck {
+    /// The post-state must sit inside `pool.max_utilization_bps`.
+    ///
+    /// For `open_position`, which adds reserve, and `lp_withdraw`, which removes
+    /// the equity the reserve is measured against. These are the two paths that
+    /// take on risk, and they are gated absolutely.
+    Ceiling,
+    /// The post-state must be no worse than this pre-state.
+    ///
+    /// For the three settlement paths and `lp_deposit`, none of which can raise
+    /// utilisation. A close lowers `reserved_quote` by the position's reserve
+    /// `r` and lowers `quote_deposited` by at most `r` — `settle_close` caps the
+    /// payout at collateral plus reserve — so with `reserved <= quote_deposited`
+    /// the ratio cannot rise. Asserting that, rather than the ceiling, is what
+    /// makes "lowering the ceiling invalidates no open position" true rather
+    /// than merely intended.
+    NotWorsened {
+        reserved_quote: u64,
+        quote_deposited: u64,
+    },
+}
+
+/// I2, in whichever of its two forms the caller is entitled to.
+fn assert_utilisation(pool: &Pool, check: &UtilisationCheck) -> Result<()> {
+    match check {
+        // The exact rational, not a floored utilisation: comparing floored
+        // ratios admits an overhang of up to a basis point of AUM, and the harm
+        // is not the dust — it is that the last position to close cannot be
+        // paid.
+        UtilisationCheck::Ceiling => require!(
+            risk_pool::utilization_within_cap(
+                u128::from(pool.reserved_quote),
+                u128::from(pool.quote_deposited),
+                pool.max_utilization_bps,
+            )
+            .map_err(crate::oracle::map_risk_error)?,
+            PerpsError::UtilizationTooHigh
+        ),
+        // `reserved_after / deposited_after <= reserved_before /
+        // deposited_before`, cross-multiplied so there is no division and no
+        // rounding — the same discipline `utilization_within_cap` applies to the
+        // ceiling. Through `cmp_products`, which multiplies into 256 bits, so
+        // the comparison is exact without anyone having to check that a product
+        // of two `u64`s fits a `u128`.
+        UtilisationCheck::NotWorsened {
+            reserved_quote,
+            quote_deposited,
+        } => require!(
+            cmp_products(
+                u128::from(pool.reserved_quote),
+                u128::from(*quote_deposited),
+                u128::from(*reserved_quote),
+                u128::from(pool.quote_deposited),
+            ) != core::cmp::Ordering::Greater,
+            PerpsError::UtilizationTooHigh
+        ),
+    }
+    Ok(())
+}
+
+/// I3 and I4, the two that need a market.
+fn assert_market_invariants(pool: &Pool, market: &Market) -> Result<()> {
+    // I3.
+    require!(
+        market.locked_quote <= pool.locked_quote && market.reserved_quote <= pool.reserved_quote,
+        PerpsError::MarketSliceExceedsPool
+    );
+
+    // I4. Open interest is added at entry notional and subtracted at entry
+    // notional, so both counters return to zero together or the accounting has
+    // drifted. Unreachable in correct operation, which is precisely why it is
+    // asserted rather than assumed — and why it has a construction test that
+    // trips it deliberately, since it would otherwise never execute.
+    require!(
+        (market.long_positions == 0) == (market.long_oi_usd == 0)
+            && (market.short_positions == 0) == (market.short_oi_usd == 0),
+        PerpsError::OpenInterestAccountingDrift
+    );
+
+    Ok(())
+}
+
+/// Every invariant the caller is in a position to assert, in one call.
+///
+/// Four of them, and the split between the two arguments is the specification
+/// rather than an implementation detail:
+///
+/// * **I1, solvency** — `assert_vault_solvent` above. Pool-wide.
+/// * **I2, the reserve is honourable** — `reserved_quote / quote_deposited`
+///   against the pool's ceiling, or against the pre-state, per
+///   [`UtilisationCheck`]. Pool-wide. Read that type's docs before changing
+///   which form a call site passes: one of the two choices bricks the protocol.
+/// * **I3, the market slices sum** — pool-wide totals bound the touched
+///   market's slice. Needs a market.
+/// * **I4, the counters and open interest agree** — a side has open interest if
+///   and only if it has positions. Needs a market.
+///
+/// `market` is `None` for the liquidity-provider paths, which move collateral
+/// and protocol fees but touch no market slice: there is no market whose I3 and
+/// I4 a deposit could have broken, and asserting them against an arbitrary one
+/// would be theatre. Position instructions touch exactly one market and pass it.
+///
+/// # I2's denominator must never become a price
+///
+/// It is `quote_deposited` — tracked equity — and not an oracle-derived figure.
+/// An assertion whose truth depends on a price can be falsified by the market
+/// moving while nobody has done anything wrong, and an unconditionally-asserted
+/// invariant that has been falsified **bricks every instruction that asserts
+/// it, `close_position` included**. A previous design put a mark-to-market
+/// quantity in an invariant and had exactly that effect.
+///
+/// I3 is the per-market bound rather than a cross-market sum: summing every
+/// market is O(markets) and not assertable on chain, while the per-market bound
+/// is O(1) and catches the error that actually matters — a market releasing
+/// more than it reserved.
+pub(crate) fn assert_pool_invariants(
+    vault: &InterfaceAccount<'_, TokenAccount>,
+    pool: &Pool,
+    market: Option<&Market>,
+    utilisation: UtilisationCheck,
+) -> Result<()> {
+    assert_vault_solvent(vault, pool)?;
+    assert_utilisation(pool, &utilisation)?;
+
+    let Some(market) = market else {
+        return Ok(());
+    };
+    assert_market_invariants(pool, market)
 }
 
 #[derive(Accounts)]
@@ -967,6 +1187,66 @@ pub fn handle_cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
     Ok(())
 }
 
+pub fn handle_set_pool_limits(
+    ctx: Context<SetPoolLimits>,
+    max_aum_quote: u64,
+    max_utilization_bps: u16,
+) -> Result<()> {
+    // Strictly inside `(0, M5_MAX_UTILIZATION_BPS]`. The upper bound is the
+    // milestone's entire answer to LP share mispricing — see the constant. The
+    // strict lower bound is separate: a zero ceiling makes every open
+    // impossible, which is what quarantining a market is for, and doing it
+    // pool-wide by parameter would be an outage disguised as a setting.
+    require!(
+        max_utilization_bps > 0 && max_utilization_bps <= M5_MAX_UTILIZATION_BPS,
+        PerpsError::UtilizationCeilingTooHigh
+    );
+
+    let pool = &mut ctx.accounts.pool;
+    pool.max_aum_quote = max_aum_quote;
+    pool.max_utilization_bps = max_utilization_bps;
+
+    // Lowering the ceiling below current utilisation is **permitted**, and there
+    // is deliberately no check for it. The temptation is to gate this on the
+    // open book, and that is the mistake the struck retune rule was written for
+    // — a gate that reads a tightening as safe and then refuses to let you
+    // undo it.
+    //
+    // What a lowering blocks is exactly two things: `open_position` and
+    // `lp_withdraw`, the two paths that can raise utilisation. It does **not**
+    // block a close, an admin settlement, an emergency close, or a deposit —
+    // those are judged by `UtilisationCheck::NotWorsened` instead, and that is
+    // not a nicety. Judging them by the ceiling would mean an admin lowering it
+    // below current utilisation reverted every exit *and* the deposits that
+    // would bring utilisation back down, with the setter's own cap at
+    // `M5_MAX_UTILIZATION_BPS` making the state unrecoverable. The claim that a
+    // lowering invalidates no open position is true because of that split, not
+    // in spite of it.
+    //
+    // Deliberately not followed by `assert_pool_invariants`: this instruction
+    // moves no tokens, and asserting the ceiling here would turn the permitted
+    // lowering into a revert.
+    emit!(PoolLimitsChanged {
+        pool: pool.key(),
+        max_aum_quote: pool.max_aum_quote,
+        max_utilization_bps: pool.max_utilization_bps,
+    });
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct SetPoolLimits<'info> {
+    #[account(seeds = [b"exchange"], bump = exchange.bump)]
+    pub exchange: Box<Account<'info, Exchange>>,
+
+    #[account(address = exchange.admin @ PerpsError::NotAdmin)]
+    pub admin: Signer<'info>,
+
+    #[account(mut, seeds = [b"pool"], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+}
+
 #[derive(Accounts)]
 pub struct CancelWithdraw<'info> {
     /// Receives both the escrowed shares and the reclaimed rent. The seeds below
@@ -1011,4 +1291,215 @@ pub struct WithdrawCancelled {
     pub pool: Pubkey,
     pub owner: Pubkey,
     pub shares: u64,
+}
+
+/// The pool's two limits changed.
+///
+/// `max_utilization_bps` may be lowered below current utilisation. That blocks
+/// new opens and new withdrawals until utilisation falls and invalidates no
+/// open position, because the invariant is asserted per instruction against the
+/// value in force at that moment. Gating the setter on open positions is the
+/// tempting mistake and it is the one that made a market unclosable before.
+#[event]
+pub struct PoolLimitsChanged {
+    pub pool: Pubkey,
+    pub max_aum_quote: u64,
+    pub max_utilization_bps: u16,
+}
+
+/// Host-side tests for the four invariants.
+///
+/// Two of them — I3 and I4 — are unreachable in correct operation, so nothing
+/// else in the tree ever executes their `require!` bodies in either direction. A
+/// typo that inverted one would compile, pass every other test, and ship as an
+/// assertion that is permanently true or permanently false; a permanently false
+/// one bricks every close. These are the construction tests that trip them
+/// deliberately.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::market::tests::{test_market, test_pool};
+
+    fn expect_error(result: Result<()>, expected: PerpsError) {
+        let code = expected as u32 + anchor_lang::error::ERROR_CODE_OFFSET;
+        match result {
+            Err(anchor_lang::error::Error::AnchorError(err)) => {
+                assert_eq!(
+                    err.error_code_number, code,
+                    "expected {expected:?} ({code})"
+                )
+            }
+            other => panic!("expected {expected:?}, got {other:?}"),
+        }
+    }
+
+    /// **I1.** The comparison is `>=`, so a donated surplus is harmless and a
+    /// single missing base unit is not.
+    #[test]
+    fn solvency_is_the_liability_sum_and_nothing_else() {
+        let mut pool = test_pool(1_000, 400);
+        pool.locked_quote = 300;
+        pool.pending_protocol_fees = 50;
+        // `reserved_quote` is deliberately not in the sum: it is a claim against
+        // liquidity-provider equity, not a liability on top of it. At 400 it
+        // would push the requirement to 1 750 and fail this.
+        assert_eq!(liabilities(&pool).unwrap(), 1_350);
+
+        assert_solvent(1_350, &pool).expect("exactly solvent is solvent");
+        assert_solvent(9_999, &pool).expect("a donated surplus is harmless");
+        expect_error(assert_solvent(1_349, &pool), PerpsError::VaultInsolvent);
+    }
+
+    /// **I2, the blocker.** A settlement that strictly *improves* utilisation
+    /// must not revert merely because an admin lowered the ceiling underneath
+    /// it.
+    ///
+    /// The state is reachable, and it is the one stage 3 exists to enable: a
+    /// pool initialised at a higher ceiling, positions opened legally under it,
+    /// and then `set_pool_limits` called to bring the ceiling down to
+    /// `M5_MAX_UTILIZATION_BPS`. Judged by the ceiling, every close reverts —
+    /// including `emergency_close_position`, the designated escape hatch — and
+    /// `lp_deposit`, the only other action that lowers utilisation, reverts too.
+    /// The ceiling cannot be raised back, because the setter caps at exactly the
+    /// value now being violated. Every position and all liquidity is trapped,
+    /// permanently.
+    #[test]
+    fn a_close_that_improves_utilisation_survives_a_lowered_ceiling() {
+        // 3 000 bps of utilisation under a ceiling since lowered to 2 000.
+        let before = test_pool(1_000_000_000, 300_000_000);
+        assert_eq!(before.max_utilization_bps, M5_MAX_UTILIZATION_BPS);
+
+        // After a close: the reserve released, and liquidity providers credited
+        // the trader's loss. Utilisation falls to roughly 2 786 bps — better,
+        // and still above the ceiling.
+        let after = test_pool(1_005_000_000, 280_000_000);
+
+        expect_error(
+            assert_utilisation(&after, &UtilisationCheck::Ceiling),
+            PerpsError::UtilizationTooHigh,
+        );
+        assert_utilisation(
+            &after,
+            &UtilisationCheck::NotWorsened {
+                reserved_quote: before.reserved_quote,
+                quote_deposited: before.quote_deposited,
+            },
+        )
+        .expect("a close that improves utilisation must never revert");
+    }
+
+    /// The monotone form is not a rubber stamp: a state that worsens utilisation
+    /// still fails it.
+    #[test]
+    fn the_monotone_form_still_rejects_a_worsening() {
+        let before = test_pool(1_000_000_000, 100_000_000);
+        let check = |pool: &Pool| {
+            assert_utilisation(
+                pool,
+                &UtilisationCheck::NotWorsened {
+                    reserved_quote: before.reserved_quote,
+                    quote_deposited: before.quote_deposited,
+                },
+            )
+        };
+
+        check(&test_pool(1_000_000_000, 100_000_000)).expect("unchanged is not worsened");
+        check(&test_pool(1_000_000_001, 100_000_000)).expect("more equity is not worsened");
+        expect_error(
+            check(&test_pool(1_000_000_000, 100_000_001)),
+            PerpsError::UtilizationTooHigh,
+        );
+        expect_error(
+            check(&test_pool(999_999_999, 100_000_000)),
+            PerpsError::UtilizationTooHigh,
+        );
+    }
+
+    /// The ceiling still binds where it is supposed to: on the paths that raise
+    /// utilisation. Weakening I2 for exits must not weaken it for entries.
+    #[test]
+    fn the_ceiling_still_binds_on_the_paths_that_raise_utilisation() {
+        assert_utilisation(
+            &test_pool(1_000_000_000, 200_000_000),
+            &UtilisationCheck::Ceiling,
+        )
+        .expect("exactly at the ceiling is within it");
+
+        // One base unit past it is not, and the comparison is the exact rational
+        // rather than a floored bps figure — floored, this would still read
+        // 2 000 and pass.
+        expect_error(
+            assert_utilisation(
+                &test_pool(1_000_000_000, 200_000_001),
+                &UtilisationCheck::Ceiling,
+            ),
+            PerpsError::UtilizationTooHigh,
+        );
+    }
+
+    /// **I3.** A market may never hold a larger slice than the pool's total.
+    ///
+    /// Both legs are asserted separately, so a copy-paste error comparing
+    /// `locked_quote` twice would be caught.
+    #[test]
+    fn a_market_slice_may_not_exceed_the_pool_total() {
+        let mut pool = test_pool(1_000_000_000, 500);
+        pool.locked_quote = 900;
+        let mut market = test_market();
+        market.locked_quote = 900;
+        market.reserved_quote = 500;
+        assert_market_invariants(&pool, &market).expect("equal slices are legal");
+
+        let mut over_locked = market.clone();
+        over_locked.locked_quote = 901;
+        expect_error(
+            assert_market_invariants(&pool, &over_locked),
+            PerpsError::MarketSliceExceedsPool,
+        );
+
+        let mut over_reserved = market.clone();
+        over_reserved.reserved_quote = 501;
+        expect_error(
+            assert_market_invariants(&pool, &over_reserved),
+            PerpsError::MarketSliceExceedsPool,
+        );
+    }
+
+    /// **I4, the construction test.** A side has open interest if and only if it
+    /// has positions.
+    ///
+    /// Unreachable in correct operation — open interest is added and subtracted
+    /// at entry notional, so the two move together — which is exactly why it
+    /// needs deliberate desynchronisation to execute at all. Each of the four
+    /// ways to break it is asserted separately: the biconditional has two sides
+    /// per leg, and a predicate checking only one would pass a test checking
+    /// only the other.
+    #[test]
+    fn desynchronised_open_interest_is_caught() {
+        let pool = test_pool(1_000_000_000, 0);
+        assert_market_invariants(&pool, &test_market()).expect("an empty book agrees with itself");
+
+        let breakages: [fn(&mut Market); 4] = [
+            |m| m.long_positions = 1,
+            |m| m.long_oi_usd = 1,
+            |m| m.short_positions = 1,
+            |m| m.short_oi_usd = 1,
+        ];
+        for break_it in breakages {
+            let mut drifted = test_market();
+            break_it(&mut drifted);
+            expect_error(
+                assert_market_invariants(&pool, &drifted),
+                PerpsError::OpenInterestAccountingDrift,
+            );
+        }
+
+        // And a book that is merely busy, rather than drifted, is not flagged.
+        let mut healthy = test_market();
+        healthy.long_positions = 3;
+        healthy.long_oi_usd = 900;
+        healthy.short_positions = 1;
+        healthy.short_oi_usd = 100;
+        assert_market_invariants(&pool, &healthy).expect("a consistent book is not drift");
+    }
 }

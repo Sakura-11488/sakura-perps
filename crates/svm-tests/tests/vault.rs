@@ -306,7 +306,11 @@ fn default_params() -> InitializePoolParams {
         deposit_fee_bps: 0,
         withdraw_fee_bps: 0,
         withdraw_delay_seconds: 60,
-        max_utilization_bps: 8_000,
+        // Was 8 000. Stage 3 makes `M5_MAX_UTILIZATION_BPS` the protocol's bound
+        // on how far an LP share price can be overstated, and enforces it at
+        // `initialize_pool` as well as at `set_pool_limits` — a ceiling settable
+        // by one instruction and not the other is not a bound.
+        max_utilization_bps: sakura_perps::M5_MAX_UTILIZATION_BPS,
         max_aum_quote: 1_000_000 * ONE,
     }
 }
@@ -759,33 +763,47 @@ fn a_provider_can_request_again_after_cancelling() {
     request_withdraw(&mut fixture, shares).expect("second request after cancel");
 }
 
-/// A 100% utilisation ceiling is refused at construction, because it is not a
-/// ceiling: it permits reserving every asset the pool holds.
+/// The utilisation ceiling is bounded at construction by
+/// `M5_MAX_UTILIZATION_BPS`, not merely below 100%.
 ///
-/// It is also the exact boundary the floored-utilisation comparison leaked
-/// through — `utilization_bps(20_001, 20_000)` floors to 10 000, which
-/// satisfied a 10 000 cap while reserving more than the pool had.
+/// This is the milestone's whole answer to LP share mispricing: the pool prices
+/// shares off tracked equity with no mark, so the worst-case overstatement is
+/// exactly `max_utilization_bps` of AUM. A pool created at 9 999 bps would carry
+/// a ~100% bound instead of a 20% one — and nothing lowers the field on its own,
+/// so it would carry it forever unless an admin happened to call
+/// `set_pool_limits`. A ceiling one instruction enforces and another does not is
+/// not a bound.
 ///
 /// Asserted through a panic because `Fixture::new` expects the pool to
 /// initialise; the panic *is* the rejection, and catching it keeps the test
 /// exercising the real instruction rather than a re-derived predicate.
 #[test]
-fn a_hundred_percent_utilization_ceiling_is_refused() {
-    let mut params = default_params();
-    params.max_utilization_bps = 10_000;
+fn a_utilization_ceiling_above_the_milestone_bound_is_refused() {
+    for refused in [
+        10_000,
+        9_999,
+        sakura_perps::M5_MAX_UTILIZATION_BPS + 1,
+        // Zero makes every open impossible, which is what quarantining a market
+        // is for; doing it pool-wide by parameter is an outage disguised as a
+        // setting.
+        0,
+    ] {
+        let mut params = default_params();
+        params.max_utilization_bps = refused;
 
-    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Fixture::new(params);
-    }));
-    assert!(
-        built.is_err(),
-        "initialize_pool must reject max_utilization_bps == BPS_DENOMINATOR"
-    );
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Fixture::new(params);
+        }));
+        assert!(
+            built.is_err(),
+            "initialize_pool must reject max_utilization_bps == {refused}"
+        );
+    }
 
-    // And the value one basis point below it is still accepted, so the bound is
-    // exclusive rather than the whole range having been narrowed.
+    // The bound itself is accepted, so it is inclusive rather than the whole
+    // range having been narrowed by one.
     let mut ok_params = default_params();
-    ok_params.max_utilization_bps = 9_999;
+    ok_params.max_utilization_bps = sakura_perps::M5_MAX_UTILIZATION_BPS;
     Fixture::new(ok_params);
 }
 

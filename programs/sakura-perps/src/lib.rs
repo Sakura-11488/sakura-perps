@@ -255,6 +255,198 @@ pub mod sakura_perps {
 
         Ok(())
     }
+
+    /// Declares a Pyth feed safe to price markets against.
+    ///
+    /// Admin-only, and the single point at which oracle risk enters the
+    /// protocol. Everything a market needs to know about its price source —
+    /// the feed id, the exact `PriceUpdateV2` account, the exponent, the sanity
+    /// band, both guard sets and the divergence tolerance — is fixed here and
+    /// copied by value at `create_market`. That is what makes listing safe to
+    /// leave permissionless: whoever creates a market picks a feed from this
+    /// allowlist and nothing else.
+    ///
+    /// There is no re-qualification. The PDA seeds make a second call fail at
+    /// account creation, and the alternative — editing a feed that markets have
+    /// already copied — would let a position be settled under numbers it was
+    /// never opened under.
+    pub fn qualify_feed(ctx: Context<QualifyFeed>, params: QualifyFeedParams) -> Result<()> {
+        market::handle_qualify_feed(ctx, params)
+    }
+
+    /// Flips a qualified feed's revocation bit.
+    ///
+    /// Revocation gates **opening only**: `create_market` and `open_position`
+    /// read it, and closing, admin settlement, emergency close, price refresh
+    /// and every liquidity-provider path do not. A feed the admin has stopped
+    /// trusting is a reason to stop taking new risk on it and never a reason to
+    /// trap the risk already there.
+    ///
+    /// It does not quarantine markets and does not close positions. One bit,
+    /// reversible, touching no value.
+    pub fn set_feed_revoked(ctx: Context<SetFeedRevoked>, revoked: bool) -> Result<()> {
+        market::handle_set_feed_revoked(ctx, revoked)
+    }
+
+    /// Lists a market against a qualified feed. Permissionless.
+    ///
+    /// Any signer may pay the rent, because creating a market grants nothing:
+    /// it is born quarantined with every risk parameter at zero, and
+    /// `max_oi_usd == 0` means no position can be opened until an admin calls
+    /// `set_risk_params`. Permissionless *listing*, not permissionless
+    /// *risk-parameter setting*.
+    pub fn create_market(ctx: Context<CreateMarket>) -> Result<()> {
+        market::handle_create_market(ctx)
+    }
+
+    /// Sets a market's full risk-parameter block, activating or quarantining it.
+    ///
+    /// Admin-only and deliberately **not** pause-gated: an admin must be able to
+    /// tighten a market while the protocol is paused, and quarantining it by
+    /// setting `max_oi_usd = 0` is the tightest action available.
+    ///
+    /// There is no gate on open positions. Every parameter a position depends
+    /// on is snapshotted at open or consumed at open, and the one change that
+    /// could genuinely make a market unclosable — a raised borrow rate — is
+    /// bounded by a ceiling rather than by a gate. A gate would have been worse
+    /// than useless: raising the rate reads as tightening, and lowering it back
+    /// would read as a loosening that the positions it bricked then block.
+    pub fn set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -> Result<()> {
+        market::handle_set_risk_params(ctx, params)
+    }
+
+    /// Accrues a market's borrow and funding indices up to now. Permissionless.
+    ///
+    /// No signer and no pause gate, both deliberately. A pause that stops the
+    /// clock is a subsidy to whoever is paying, and an authority-gated accrual
+    /// would mean the protocol's clock ran only while somebody with a key was
+    /// paying attention.
+    ///
+    /// It reads **no oracle**. Requiring a fresh price would make settlement
+    /// fail exactly when the oracle is degraded, which is when accrual matters
+    /// most. It does read the pool, because borrow accrues against pool-wide
+    /// utilisation — so borrow is coupled across markets, and opening a position
+    /// in one raises the borrow rate in every other.
+    ///
+    /// The same routine runs at the head of every position instruction. This one
+    /// exists so accrual does not depend on trading activity.
+    pub fn settle_market(ctx: Context<SettleMarket>) -> Result<()> {
+        market::handle_settle_market(ctx)
+    }
+
+    /// Advances a market's oracle-free settlement reference. Permissionless.
+    ///
+    /// Loads under the trading guards, clamps the mid into its own EMA band and
+    /// writes `last_good_price`. Touches no value, moves no tokens, and grants
+    /// the caller nothing.
+    ///
+    /// It exists so that reference cannot be frozen. Without it, an admin could
+    /// pause opening and closing, wait for the market to move, and then
+    /// emergency-close every position at the stale price those two instructions
+    /// had left behind. With it, anyone can advance the reference at any time
+    /// for the cost of one transaction, and freezing it requires the feed itself
+    /// to be dead — in which case `last_good_price` genuinely is the last honest
+    /// price there was. That is why it is neither pausable nor admin-gated.
+    pub fn refresh_market_price(ctx: Context<RefreshMarketPrice>) -> Result<()> {
+        market::handle_refresh_market_price(ctx)
+    }
+
+    /// Sets the pool's deposit cap and its utilisation ceiling. Admin-only.
+    ///
+    /// `max_utilization_bps` had no setter at all until now — it was written
+    /// once at `initialize_pool` and the live devnet pool was stuck with
+    /// whatever it was given. That matters more than it sounds: the ceiling is
+    /// this milestone's bound on how far an LP share price can be overstated,
+    /// capped at [`M5_MAX_UTILIZATION_BPS`], so leaving it unsettable meant the
+    /// bound could not actually be applied to a running pool.
+    pub fn set_pool_limits(
+        ctx: Context<SetPoolLimits>,
+        max_aum_quote: u64,
+        max_utilization_bps: u16,
+    ) -> Result<()> {
+        pool::handle_set_pool_limits(ctx, max_aum_quote, max_utilization_bps)
+    }
+
+    /// Opens an isolated position against the shared liquidity pool.
+    ///
+    /// One position per owner per market, created with `init` and never
+    /// `init_if_needed`: the second would silently overwrite a live position's
+    /// entry price and indices while the pool still held its collateral and its
+    /// reserve. Adding to a position is a later milestone.
+    ///
+    /// Thirteen ordered steps, and the order is part of the specification. Two
+    /// of them carry the safety argument for this leg. Divergence between the
+    /// spot price and its own EMA is a **rejection** here — the only leg where
+    /// refusing is a safe default, because there is no position yet to trap —
+    /// and every parameter the position will later be judged by is snapshotted
+    /// onto it now, so no admin retune can reach an open position.
+    ///
+    /// The collateral transfer is measured rather than assumed. A Token-2022
+    /// mint carrying a transfer-fee extension delivers less than was sent, and
+    /// booking a liability for the requested amount would break the solvency
+    /// invariant on the spot.
+    pub fn open_position(ctx: Context<OpenPosition>, params: OpenPositionParams) -> Result<()> {
+        position::handle_open_position(ctx, params)
+    }
+
+    /// Closes a position the caller owns, settling it against the pool.
+    ///
+    /// Pause-gated and nothing more. **No quarantine check and no revocation
+    /// check**: a market that has stopped accepting new risk must still let
+    /// existing risk out, or every tightening action doubles as a trap.
+    ///
+    /// The exit price is clamped into the feed's own EMA band in **both**
+    /// directions and never rejected. Rejecting at exit would be most valuable
+    /// to a manipulator at exactly the moment it fired, and an adverse-only
+    /// clamp would stop the pool paying out on a manipulated price while doing
+    /// nothing to stop it charging on one.
+    ///
+    /// The spread applied is the position's snapshot, not the market's live
+    /// value, so an admin cannot retroactively tax an exit — or, past
+    /// `confidence + spread >= mid`, make one unpriceable.
+    pub fn close_position(ctx: Context<ClosePosition>, params: ClosePositionParams) -> Result<()> {
+        position::handle_close_position(ctx, params)
+    }
+
+    /// Liquidates a position that no longer meets its maintenance margin.
+    ///
+    /// The only forced exit this milestone ships — there is no permissionless
+    /// keeper path — which is why every clamp on it is load-bearing: if this
+    /// instruction cannot settle a position, nothing can.
+    ///
+    /// Priced under the **liquidation** guards, which may legitimately be the
+    /// looser of the two: refusing to liquidate is not a safe default, because a
+    /// position the pool cannot close is one it underwrites for free while the
+    /// loss grows. Health is judged at **current** notional rather than entry
+    /// notional, since the maintenance requirement is a statement about the
+    /// exposure that exists now.
+    ///
+    /// The payout destination is pinned to the position's own owner. An admin
+    /// naming their own token account would turn a liquidation into a transfer
+    /// to the liquidator, and nothing else in the account list would notice.
+    pub fn admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result<()> {
+        position::handle_admin_settle_position(ctx)
+    }
+
+    /// Winds a position down with **no oracle at all**.
+    ///
+    /// This is the exit that has to survive everything else failing, so it takes
+    /// no price account, no feed account and no pause gate, and it settles
+    /// against `market.last_good_price` — a number kept on the market itself by
+    /// every successful price read, including the permissionless
+    /// `refresh_market_price`, precisely so that pausing the trading paths
+    /// cannot freeze it.
+    ///
+    /// Loosening the oracle guards was the alternative and it is not a fix: a
+    /// loosened guard still fails when the oracle is *absent*, and absent is
+    /// what revocation, delisting and an outage all produce.
+    ///
+    /// Two preconditions, both public and both slow: the market must be
+    /// quarantined, and it must have been for a day. A wind-down is therefore
+    /// announced by the chain before any value moves.
+    pub fn emergency_close_position(ctx: Context<EmergencyClosePosition>) -> Result<()> {
+        position::handle_emergency_close_position(ctx)
+    }
 }
 
 /// Accounts for [`sakura_perps::set_pause_flags`].
@@ -409,6 +601,10 @@ pub struct Exchange {
     pub _reserved: [u8; 96],
 }
 
+// Frozen. There is a live devnet exchange, and `InitSpace` is the only place
+// this number is written down; a silent change to it orphans that account.
+const _: () = assert!(Exchange::INIT_SPACE == 304);
+
 #[derive(Accounts)]
 pub struct InitializeExchange<'info> {
     #[account(mut)]
@@ -527,4 +723,80 @@ pub enum PerpsError {
     VaultInsolvent,
     #[msg("Pause bitfield contains bits that are not defined.")]
     InvalidPauseFlags,
+
+    // ── Markets and positions ───────────────────────────────────────────────
+    // Appended, never inserted. Anchor numbers these positionally from 6000, so
+    // a variant added in the middle renumbers every one after it and silently
+    // relabels errors for the deployed IDL, the devnet clients and the SVM
+    // tests -- all three of which compare the numeric code.
+    #[msg("Feed parameters are outside the permitted ranges.")]
+    InvalidFeedParameters,
+    #[msg("Confidence gate plus the maximum spread would leave prices unstrikeable.")]
+    ConfidenceGateTooWide,
+    #[msg("This feed has been revoked; existing positions may still be closed.")]
+    FeedRevoked,
+    #[msg("Price update account is not the one this market was pinned to.")]
+    WrongPriceUpdate,
+    #[msg("Position belongs to a different market.")]
+    WrongMarket,
+    #[msg("Account is not the owner of this position.")]
+    NotPositionOwner,
+    #[msg("Market creation is paused.")]
+    MarketCreationPaused,
+    #[msg("Opening positions is paused.")]
+    TradingPaused,
+    #[msg("Closing positions is paused.")]
+    ClosingPaused,
+    #[msg("Liquidation is paused.")]
+    LiquidationPaused,
+    #[msg("Market is quarantined and will not accept new positions.")]
+    MarketQuarantined,
+    #[msg("Market is not quarantined, so emergency close is not available.")]
+    MarketNotQuarantined,
+    #[msg("Market has not been quarantined long enough to emergency-close.")]
+    EmergencyCloseTooSoon,
+    #[msg("Open interest on this side would exceed the market's cap.")]
+    OpenInterestCapExceeded,
+    #[msg("Profit cap is too large a multiple of the initial margin.")]
+    ReserveLeverageTooHigh,
+    #[msg("Borrow rate exceeds the program's ceiling.")]
+    BorrowRateTooHigh,
+    #[msg("Funding rate cap exceeds the program's ceiling.")]
+    FundingRateTooHigh,
+    #[msg("Funding sensitivity exceeds the program's ceiling.")]
+    FundingSensitivityTooHigh,
+    #[msg("Round-trip fees do not exceed the funding accruable over the policy holding period.")]
+    FeesDoNotDominateFunding,
+    #[msg("Round-trip fees do not cover the oracle drift a stale price permits.")]
+    FeesDoNotDominateDrift,
+    #[msg("Settlement window exceeds the permitted maximum.")]
+    SettleWindowTooLong,
+    #[msg("Risk parameters are outside the permitted ranges.")]
+    InvalidRiskParameters,
+    #[msg("Position is below one of the market's minimums.")]
+    PositionTooSmall,
+    #[msg("Collateral net of the open fee does not meet the initial margin requirement.")]
+    InsufficientMargin,
+    #[msg("Spot price diverges from the EMA by more than this market permits.")]
+    PriceDiverged,
+    #[msg("Position is not liquidatable at the current price.")]
+    PositionNotLiquidatable,
+    #[msg("Utilisation ceiling is outside the range the program permits.")]
+    UtilizationCeilingTooHigh,
+    // Not in the specification's variant list, which never defines
+    // `OpenPositionParams` at all. `side` is a `u8` on the wire and
+    // `Position::is_long` tests it for equality with `SIDE_LONG`, so any third
+    // value would book a short — a position facing the wrong way, with no error
+    // for the caller to read. Rejecting it is cheaper than explaining it.
+    #[msg("Position side must be either long or short.")]
+    InvalidPositionSide,
+
+    // The two below are invariant failures, expected to be unreachable in
+    // correct operation. They are named anyway: without them a genuine
+    // accounting drift surfaces as `MathOverflow` from the surrounding
+    // `checked_*` idiom, which hides the one error worth waking up for.
+    #[msg("Market's locked or reserved slice exceeds the pool's total.")]
+    MarketSliceExceedsPool,
+    #[msg("Market's position counters and open interest disagree.")]
+    OpenInterestAccountingDrift,
 }

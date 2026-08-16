@@ -932,3 +932,263 @@ proptest! {
         }
     }
 }
+
+// ── Fee splitting and the liquidation fee ───────────────────────────────────
+
+use sakura_perps_risk::position::{apply_liquidation_fee, fee_split_quote};
+
+/// Mirrors `sakura_perps::market::MAX_SPREAD_BPS`.
+///
+/// Duplicated rather than imported because this crate deliberately has no
+/// dependency on the program. If the two ever diverge, the totality argument
+/// below stops covering every spread the program admits — which is why the
+/// value is named here instead of being written inline as `500`.
+const MAX_SPREAD_BPS: u16 = 500;
+
+proptest! {
+    /// The two halves of a split re-sum to exactly the fee. This is what lets
+    /// the solvency argument treat a fee as moving between liability buckets
+    /// rather than changing their total: if a single base unit could be minted
+    /// or lost here, the vault comparison would drift by that unit per close.
+    #[test]
+    fn fee_split_quote_re_sums_exactly(fee in 0u128..u128::MAX / 2, share in bps()) {
+        let split = fee_split_quote(fee, share).unwrap();
+        prop_assert_eq!(split.protocol_quote.checked_add(split.lp_quote), Some(fee));
+    }
+
+    /// The protocol share is floored and the pool takes the remainder, so a
+    /// rounding error can only ever favour the pool.
+    #[test]
+    fn fee_split_quote_never_over_pays_the_protocol(
+        fee in 0u128..1_000_000_000_000u128, share in bps()
+    ) {
+        let split = fee_split_quote(fee, share).unwrap();
+        let exact = mul_div_floor(fee, share as u128, 10_000).unwrap();
+        prop_assert_eq!(split.protocol_quote, exact);
+        prop_assert!(split.protocol_quote <= fee);
+    }
+
+    /// **B3.** The four payout fields re-sum, and the net payout is
+    /// representable, for every settlement `settle_close` can produce and every
+    /// liquidation fee — including fees far larger than the position's whole
+    /// notional, which is the ordinary late-liquidation case rather than an
+    /// edge case. Without the clamp the subtraction underflows and the position
+    /// becomes permanently unliquidatable on the only liquidation path M5 has.
+    #[test]
+    fn apply_liquidation_fee_re_sums_and_never_underflows(
+        collateral in 0u128..1_000_000_000u128,
+        reserve in 0u128..1_000_000_000u128,
+        equity_usd in -1_000_000_000i128..1_000_000_000i128,
+        close_fee in 0u128..10_000_000u128,
+        liq_fee in 0u128..100_000_000_000u128,
+        decimals in 0u8..=12,
+    ) {
+        let settlement =
+            settle_close(collateral, reserve, equity_usd, close_fee, decimals).unwrap();
+        let settled = apply_liquidation_fee(settlement, liq_fee, decimals).unwrap();
+
+        prop_assert_eq!(settled.gross_payout_quote, settlement.gross_payout_quote);
+        prop_assert_eq!(settled.close_fee_quote, settlement.close_fee_quote);
+        prop_assert!(
+            settled.liquidation_fee_quote
+                <= settlement.gross_payout_quote - settlement.close_fee_quote
+        );
+        prop_assert_eq!(
+            settled.close_fee_quote + settled.liquidation_fee_quote + settled.net_payout_quote,
+            settled.gross_payout_quote
+        );
+        // Carried through, not recomputed: §4.2 books one and the close event
+        // reports the other, on the admin path as much as the ordinary one.
+        prop_assert_eq!(settled.bad_debt_usd, settlement.bad_debt_usd);
+        prop_assert_eq!(settled.profit_capped, settlement.profit_capped);
+    }
+
+    /// A zero gross payout absorbs any liquidation fee at all. The insolvent
+    /// close is the common case, not the corner: equity is gone, the payout is
+    /// zero, and there is nothing for the fee to come out of.
+    #[test]
+    fn a_zero_payout_takes_no_liquidation_fee(
+        liq_fee in 0u128..u64::MAX as u128, decimals in 0u8..=12
+    ) {
+        let settlement = settle_close(1_000, 0, -1, 0, decimals).unwrap();
+        prop_assert_eq!(settlement.gross_payout_quote, 0);
+        let settled = apply_liquidation_fee(settlement, liq_fee, decimals).unwrap();
+        prop_assert_eq!(settled.liquidation_fee_quote, 0);
+        prop_assert_eq!(settled.net_payout_quote, 0);
+    }
+}
+
+// ── Totality of `execution_price` under the liquidation guards ──────────────
+//
+// M6's revert half is closed by an arithmetic argument, and an arithmetic
+// argument that is not property-tested is a comment. `validate_price` admits a
+// price only when `confidence × 10_000 <= max_confidence_bps × mid`;
+// `execution_price` computes `adverse = confidence + mid × spread_bps / 10_000`
+// and refuses when `adverse >= mid`. So
+// `adverse <= mid × (max_confidence_bps + spread_bps) / 10_000 < mid` exactly
+// when `max_confidence_bps + spread_bps < 10_000`.
+//
+// It has to be the **liquidation** gate: `validate_guard_ordering` permits that
+// to be the wider of the two, and admin settlement prices under it. Written
+// against the trading gate, this would prove the wrong thing.
+
+/// The widest confidence gate a qualified feed may carry, given that a market's
+/// spread may be anything up to [`MAX_SPREAD_BPS`].
+const MAX_ADMISSIBLE_CONFIDENCE_BPS: u16 = 10_000 - MAX_SPREAD_BPS - 1;
+
+fn liquidation_guards_with(max_confidence_bps: u16) -> OracleGuards {
+    OracleGuards {
+        max_age_seconds: 120,
+        max_age_slots: 300,
+        max_future_skew_seconds: 10,
+        max_confidence_bps,
+        min_price: 1,
+        max_price: u128::MAX,
+        expected_exponent: -8,
+    }
+}
+
+/// A mantissa, a confidence gate, and a confidence the gate admits.
+///
+/// Dependent rather than independent on purpose. Generating the three freely and
+/// discarding the rejected combinations would leave a test that passes when the
+/// generator drifts and stops admitting anything at all — a totality proof that
+/// proves nothing is the exact failure mode this property exists to rule out.
+/// Here every generated case reaches `execution_price`.
+fn admitted_price() -> impl Strategy<Value = (i64, u64, u16)> {
+    (
+        1i64..100_000_000_000_000i64,
+        0u16..=MAX_ADMISSIBLE_CONFIDENCE_BPS,
+    )
+        .prop_flat_map(|(mantissa, max_confidence_bps)| {
+            // The gate is `confidence × 10_000 <= max_confidence_bps × price`,
+            // and both legs normalise by the same power of ten, so the scales
+            // cancel and the bound can be written on the raw mantissa.
+            let limit = (mantissa as u64).saturating_mul(max_confidence_bps as u64) / 10_000;
+            (Just(mantissa), 0u64..=limit, Just(max_confidence_bps))
+        })
+}
+
+proptest! {
+    /// Every price the liquidation guard admits can be struck at every legal
+    /// spread, on both sides and in both directions.
+    ///
+    /// Driven through `validate_price` rather than through a restatement of its
+    /// gate, so the property covers what the guard really admits instead of what
+    /// this test believes it admits.
+    ///
+    /// This is the **unclamped** composition. Both oracle-priced exits insert the
+    /// program's EMA clamp between these two calls, which moves the mid; the
+    /// lemma that keeps the property true across that move is the next one, and
+    /// `market::tests` is where the clamp is shown to perform the scaling the
+    /// lemma requires. Neither half is sufficient alone — that gap is how the
+    /// unrescaled-confidence revert survived a green suite.
+    #[test]
+    fn every_admitted_price_is_strikeable_at_every_legal_spread(
+        (mantissa, confidence, max_confidence_bps) in admitted_price(),
+        spread_bps in 0u16..=MAX_SPREAD_BPS,
+        now in 1_700_000_000i64..1_900_000_000i64,
+        slot in 300u64..1_000_000_000u64,
+    ) {
+        // Validation 6, restated as the precondition it is.
+        prop_assert!((max_confidence_bps as u32) + (spread_bps as u32) < 10_000);
+
+        let guards = liquidation_guards_with(max_confidence_bps);
+        let raw = RawPrice {
+            mantissa,
+            confidence,
+            exponent: -8,
+            publish_time: now,
+            posted_slot: slot,
+        };
+
+        // Not `if let`: the generator only produces admissible prices, so a
+        // rejection here is a failure of the property and not a skipped case.
+        let price = validate_price(raw, &guards, now, slot)
+            .expect("the generator only produces prices the guard admits");
+
+        for side in [Side::Long, Side::Short] {
+            for direction in [PriceDirection::Open, PriceDirection::Close] {
+                let struck =
+                    execution_price(side, direction, price.price, price.confidence, spread_bps);
+                prop_assert!(
+                    struck.is_ok(),
+                    "unstrikeable at conf_bps={} spread={}: {:?}",
+                    max_confidence_bps,
+                    spread_bps,
+                    struck,
+                );
+            }
+        }
+    }
+
+    /// Scaling a mid and its confidence by the same rational preserves
+    /// strikeability.
+    ///
+    /// This is the lemma the exit paths rest on. `validate_price` bounds the
+    /// confidence against the **spot**, and the program then clamps the mid into
+    /// the feed's EMA band — so the bound the totality argument uses is a
+    /// statement about a number that is no longer the one being struck. Moving
+    /// the confidence by the same factor restores it: with
+    /// `confidence' = floor(confidence × mid' / mid)` the gate inequality holds
+    /// against `mid'`, and the adverse edge stays strictly inside it.
+    ///
+    /// Without the rescale this property is false, and the failure is not
+    /// cosmetic: `execution_price` returns `InvalidPrice`, and a position whose
+    /// exit cannot be priced is neither closable nor liquidatable.
+    #[test]
+    fn scaling_a_mid_and_its_confidence_together_preserves_strikeability(
+        (mantissa, confidence, max_confidence_bps) in admitted_price(),
+        spread_bps in 0u16..=MAX_SPREAD_BPS,
+        // The clamp can move the mid in either direction and by a long way: a
+        // spot 22x its EMA is pulled down to the band edge, and a collapsed spot
+        // is pulled up.
+        numerator in 1u128..100_000u128,
+        denominator in 1u128..100_000u128,
+    ) {
+        let mid = mantissa as u128;
+        let confidence = confidence as u128;
+        prop_assert!(confidence * 10_000 <= (max_confidence_bps as u128) * mid);
+
+        let scaled_mid = mul_div_floor(mid, numerator, denominator).unwrap_or(0);
+        prop_assume!(scaled_mid > 0);
+        let scaled_confidence = mul_div_floor(confidence, scaled_mid, mid)
+            .expect("mid is non-zero");
+
+        // The gate survives the move, which is the whole content of the lemma.
+        prop_assert!(
+            scaled_confidence * 10_000 <= (max_confidence_bps as u128) * scaled_mid,
+            "the rescaled confidence left the gate: {scaled_confidence} at mid {scaled_mid}"
+        );
+
+        for side in [Side::Long, Side::Short] {
+            for direction in [PriceDirection::Open, PriceDirection::Close] {
+                let struck = execution_price(
+                    side, direction, scaled_mid, scaled_confidence, spread_bps);
+                prop_assert!(
+                    struck.is_ok(),
+                    "unstrikeable after scaling to {}: conf_bps={} spread={}: {:?}",
+                    scaled_mid,
+                    max_confidence_bps,
+                    spread_bps,
+                    struck,
+                );
+            }
+        }
+    }
+
+    /// And the bound is load-bearing rather than decorative: past it the revert
+    /// is reachable. A 10 000 bps gate admits a confidence equal to the mid, at
+    /// which the adverse edge already reaches the mid and any spread at all
+    /// pushes it through.
+    #[test]
+    fn past_the_bound_the_revert_is_reachable(
+        mid in 1_000_000u128..1_000_000_000_000u128,
+        spread_bps in 1u16..=MAX_SPREAD_BPS,
+    ) {
+        prop_assert_eq!(
+            execution_price(Side::Long, PriceDirection::Close, mid, mid, spread_bps),
+            Err(RiskError::InvalidPrice)
+        );
+    }
+}
