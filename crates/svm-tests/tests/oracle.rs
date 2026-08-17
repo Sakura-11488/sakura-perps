@@ -431,3 +431,38 @@ fn an_account_not_owned_by_the_pyth_receiver_is_refused() {
         "an account not owned by the Pyth receiver must be refused"
     );
 }
+
+/// A non-positive mantissa is refused before it is scaled.
+///
+/// This is the one variant the rest of the matrix above does not reach, and it
+/// is the shape a broken or attacker-influenced feed most plausibly takes: a
+/// price of zero or below is not a cheap asset, it is an absent one. It is also
+/// the only refusal here that is *not* about time or width — it is about the
+/// number itself — and it must fire before the sanity band, because a price of
+/// zero would otherwise be reported as merely out of band and invite an
+/// operator to widen the band.
+#[test]
+fn a_zero_price_is_refused() {
+    let account = price_update_account(FEED_ID, 0, 0, PRICE_EXPONENT, NOW_UNIX - 1, NOW_SLOT - 1);
+    expect_error(
+        probe(account, FEED_ID, Guards::default()),
+        PerpsError::OracleInvalidPrice,
+    );
+}
+
+/// And so is a negative one.
+#[test]
+fn a_negative_price_is_refused() {
+    let account = price_update_account(
+        FEED_ID,
+        -PRICE_MANTISSA,
+        0,
+        PRICE_EXPONENT,
+        NOW_UNIX - 1,
+        NOW_SLOT - 1,
+    );
+    expect_error(
+        probe(account, FEED_ID, Guards::default()),
+        PerpsError::OracleInvalidPrice,
+    );
+}

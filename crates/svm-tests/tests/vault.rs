@@ -87,6 +87,31 @@ fn pda(seeds: &[&[u8]]) -> Address {
 
 impl Fixture {
     fn new(params: InitializePoolParams) -> Self {
+        let mut fixture = Self::without_pool();
+        fixture.initialize_pool(params);
+        // The exchange is created with every flag set. Nothing could deposit
+        // until set_pause_flags existed -- writing this fixture is what found it.
+        fixture.set_pause_flags(0);
+
+        // The share mint only exists after the pool is initialised.
+        fixture.lp_share_account =
+            CreateAssociatedTokenAccount::new(&mut fixture.svm, &fixture.lp, &fixture.share_mint)
+                .owner(&fixture.lp.pubkey())
+                .send()
+                .expect("lp share account");
+
+        fixture
+    }
+
+    /// The exchange and the collateral mint, with the pool deliberately not yet
+    /// created.
+    ///
+    /// `initialize_pool` creates four accounts with `init`. Once they exist,
+    /// every further attempt fails on the System Program's `AccountAlreadyInUse`
+    /// — which reads as a refusal and proves nothing about *why*. The
+    /// authorisation test needs a fixture that stops short of the pool so the
+    /// admin constraint is what refuses it.
+    fn without_pool() -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program(sakura_perps::ID, &program_binary())
             .expect("program loads");
@@ -140,18 +165,6 @@ impl Fixture {
         };
 
         fixture.initialize_exchange();
-        fixture.initialize_pool(params);
-        // The exchange is created with every flag set. Nothing could deposit
-        // until set_pause_flags existed -- writing this fixture is what found it.
-        fixture.set_pause_flags(0);
-
-        // The share mint only exists after the pool is initialised.
-        fixture.lp_share_account =
-            CreateAssociatedTokenAccount::new(&mut fixture.svm, &fixture.lp, &fixture.share_mint)
-                .owner(&fixture.lp.pubkey())
-                .send()
-                .expect("lp share account");
-
         fixture
     }
 
@@ -539,11 +552,16 @@ fn a_zero_deposit_is_refused() {
 }
 
 /// Only the admin may create the pool.
+///
+/// Against a fixture whose pool already exists this test was vacuous: the
+/// `init` on `pool` failed first with `AccountAlreadyInUse`, so it stayed green
+/// with `address = exchange.admin` replaced by the tautology
+/// `address = admin.key()`. Run against `Fixture::without_pool`, the admin
+/// constraint is the only thing that can refuse it, and the positive control
+/// underneath proves the attempt was otherwise well-formed.
 #[test]
 fn a_non_admin_cannot_initialize_the_pool() {
-    // Build a fixture whose pool is not yet created, by initialising a second
-    // exchange is impossible — so assert on a fresh attempt with a stranger.
-    let mut fixture = Fixture::new(default_params());
+    let mut fixture = Fixture::without_pool();
     let stranger = Keypair::new();
     fixture
         .svm
@@ -551,11 +569,23 @@ fn a_non_admin_cannot_initialize_the_pool() {
         .unwrap();
 
     let instruction = fixture.initialize_pool_ix(default_params(), stranger.pubkey());
-    // The pool already exists, so this fails regardless; what matters is that
-    // it is refused, and that a stranger is never the one who creates it.
+    expect_error(
+        fixture.send(instruction, &[&stranger]),
+        PerpsError::NotAdmin,
+    );
     assert!(
-        fixture.send(instruction, &[&stranger]).is_err(),
-        "a stranger must not be able to initialise the pool"
+        fixture
+            .svm
+            .get_account(&fixture.pool)
+            .is_none_or(|account| account.data.is_empty()),
+        "the refused attempt must not have created the pool"
+    );
+
+    // The same instruction from the admin, which must succeed.
+    fixture.initialize_pool(default_params());
+    assert_eq!(
+        fixture.pool_state().max_utilization_bps,
+        default_params().max_utilization_bps
     );
 }
 
@@ -574,10 +604,23 @@ fn the_wrong_token_program_is_refused() {
         }
     }
     let lp = fixture.lp.insecure_clone();
-    assert!(
-        fixture.send(instruction, &[&lp]).is_err(),
-        "a mismatched token program must be refused"
-    );
+    // Anchor's `ConstraintTokenTokenProgram` (2021), not the program's own
+    // `WrongTokenProgram` (6032). `quote_vault` carries
+    // `token::token_program = token_program`, and Anchor evaluates that while
+    // resolving the vault — which is declared before `token_program` — so the
+    // vault's own constraint refuses this before the `address =` on the program
+    // account is reached. The exact code is asserted rather than a bare
+    // `is_err()` so that a future reordering, which would change *which* guard
+    // caught it, is visible here rather than silent.
+    match fixture.send(instruction, &[&lp]) {
+        Err(TransactionError::InstructionError(0, InstructionError::Custom(code))) => {
+            assert_eq!(
+                code, 2021,
+                "expected Anchor's ConstraintTokenTokenProgram, got {code}"
+            );
+        }
+        other => panic!("a mismatched token program must be refused, got {other:?}"),
+    }
 }
 
 /// Depositing from a token account somebody else owns is refused.

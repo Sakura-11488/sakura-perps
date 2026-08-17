@@ -313,13 +313,90 @@ directly, which is how oracle staleness, wide confidence intervals, and
 liquidation cascades get tested deterministically in milliseconds instead of
 waiting for a real price to move.
 
+## Milestone 5 — markets and positions
+
+Code complete on `main`, **not deployed**. Devnet still runs `devnet-v0.5.0`,
+which predates all of it.
+
+| Stage | What | State |
+|---|---|---|
+| 1 | `crates/risk` pure-function layer | done — `7c6f62c` |
+| 1b | the three holes markets make reachable | done — `40fff01` |
+| 2 | `QualifiedFeed`, `Market`, `Position` layouts | done — `2749aaf` |
+| 3 | the eleven instructions | done — `f6d34ee` |
+| 4 | LiteSVM coverage, then deploy | in progress |
+
+Eleven entry points: `qualify_feed`, `set_feed_revoked`, `create_market`,
+`set_risk_params`, `set_pool_limits`, `settle_market`, `refresh_market_price`,
+`open_position`, `close_position`, `admin_settle_position`,
+`emergency_close_position`.
+
+### The spec, and why it is written the way it is
+
+[`docs/m5-spec.md`](docs/m5-spec.md) is authoritative and carries provenance tags
+per section — `[RETAINED]`, `[RECONSTRUCTED]`, `[REVISED]`, `[REVISED ×2]`. The
+original was lost with a cleaned scratchpad before it was ever committed; what is
+there now is a reconstruction that has since been through three adversarial
+refutation passes. Where it strikes an earlier claim as false, that record is
+deliberate. The tags earned their keep: **every blocker the first pass found
+landed in `[RECONSTRUCTED]` text, and every `[RETAINED]` section survived.**
+
+Four blockers shaped the code:
+
+**Booking a fee the vault never took.** `settle_close` takes `close_fee_usd` as
+input and returns `close_fee_quote` as its *clamped* output — zero when equity is
+non-positive. Booking the input made liabilities exceed the vault, so the
+solvency invariant reverted the close and the position became permanently
+unclosable, in a milestone that ships no keeper liquidation. The ledger books
+`settled.close_fee_quote`. Three independent reviewers found this one.
+
+**No exit that survives a dead feed.** All three close paths originally needed a
+passing oracle read, so a feed that stopped publishing — a delisting, an outage,
+or precisely the revocation the design exists for — trapped every position and
+pinned LP capital behind the utilisation ceiling. `emergency_close_position` now
+takes no price account, no pause gate, and settles from `last_good_price`, which
+a *permissionless* `refresh_market_price` advances so an admin cannot freeze the
+reference by pausing everything else.
+
+**A liquidation fee that could underflow the transfer.** `apply_liquidation_fee`
+clamps twice: against collateral, then against what the close fee left of the
+gross.
+
+**Eight instructions, one account constraint.** Anchor checks the discriminator,
+program ownership and the seeds you write — nothing else. Every other binding was
+an implementer's invention. `has_one = market`, the vault seeds, and the token
+mint and owner pins are now explicit.
+
+### LP share pricing ships as a bound, not a fix
+
+Shares price off `pool.quote_deposited`, which ignores what open positions are
+owed. The obvious fix — an aggregate mark — was designed, reviewed, and
+**deleted for cause**: the pool's liability is the sum of
+`max(0, min(equity, cap))` per position, and `max`/`min` do not commute with
+summation. Two longs at +100 and −100 net to zero aggregate PnL while the pool
+genuinely owes the winner 100, so a balanced two-sided book — the normal state of
+a perp DEX — marks to a liability of zero.
+
+No aggregate over `(Σ size, Σ entry_notional)` can compute it, and pricing off
+`reserved_quote` instead is worse than the bug in both directions. So M5 ships
+the bound: `M5_MAX_UTILIZATION_BPS = 2_000` caps reserved at 20% of AUM, which is
+a provable ceiling on how far a share price can be overstated. `risk::pool::aum_usd`
+stays uncalled and undeleted; §4.4 of the spec names what M6 must build to call it.
+
+### Account layouts are size-locked
+
+Every stage-3 field came out of `_reserved` rather than off the end — `Market`
+128→96, `Position` 64→62, `Pool` 120→128 less the inert `min_liquidity_quote`.
+Six compile-time `INIT_SPACE` asserts hold it there, because growing a struct
+orphans every live devnet account rather than migrating it.
+
 ## Roadmap
 
 - [x] **1** — repo, CI, first devnet deploy
-- [ ] **2** — risk core: fixed-point `i128`, zero floats, property tests
-- [ ] **3** — oracle adapter with staleness and confidence rejection
-- [ ] **4** — collateral vault
-- [ ] **5** — positions: open, close, isolated margin
+- [x] **2** — risk core: fixed-point `i128`, zero floats, property tests
+- [x] **3** — oracle adapter with staleness and confidence rejection
+- [x] **4** — collateral vault
+- [ ] **5** — positions: open, close, isolated margin — *code complete, not deployed*
 - [ ] **6** — funding and borrow fees
 - [ ] **7** — liquidation, insurance fund, bad-debt path
 - [ ] **8** — liquidation keeper
