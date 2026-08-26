@@ -3822,6 +3822,14 @@ fn every_risk_parameter_validation_refuses_and_writes_nothing() {
     assert_eq!(fixture.market_state().close_fee_bps, 20);
 }
 
+/// A feed id paired with the parameters to qualify it under.
+///
+/// Named so the case table below does not nest a tuple inside a tuple, which
+/// trips `clippy::type_complexity` under `-D warnings`. Aliasing it in one place
+/// also keeps `feed_row`'s return type and the table that consumes it in step by
+/// construction, rather than by remembering to edit both.
+type FeedCase = ([u8; 32], QualifyFeedParams);
+
 /// Build a feed-qualification row: a distinct feed id and a copy of the shared
 /// parameters with one field perturbed.
 ///
@@ -3829,7 +3837,7 @@ fn every_risk_parameter_validation_refuses_and_writes_nothing() {
 /// so a reused id fails with the System Program's `AccountAlreadyInUse` while
 /// Anchor is still walking the account list — before the validation under test
 /// has run at all.
-fn feed_row(id: u8, mutate: impl FnOnce(&mut QualifyFeedParams)) -> ([u8; 32], QualifyFeedParams) {
+fn feed_row(id: u8, mutate: impl FnOnce(&mut QualifyFeedParams)) -> FeedCase {
     let feed_id = [id; 32];
     let mut params = feed_params(feed_id);
     mutate(&mut params);
@@ -3848,7 +3856,7 @@ fn feed_row(id: u8, mutate: impl FnOnce(&mut QualifyFeedParams)) -> ([u8; 32], Q
 fn every_feed_qualification_validation_refuses() {
     let mut fixture = Fixture::new(active_params());
 
-    let rows: Vec<(&str, ([u8; 32], QualifyFeedParams), PerpsError)> = vec![
+    let rows: Vec<(&str, FeedCase, PerpsError)> = vec![
         (
             "1: an exponent below the range normalize_price can apply",
             feed_row(30, |p| p.expected_exponent = MIN_EXPONENT - 1),
