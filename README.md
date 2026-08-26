@@ -157,6 +157,7 @@ Source-to-bytecode traceability. Every deploy gets a row.
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `7c833439…310bbab3` | `devnet-v0.3.0` | 2026-07-28 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `5d879e58…07e61d2d` | `devnet-v0.4.0` | 2026-07-28 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `6abbbf6d…fdba2a87` | `devnet-v0.5.0` | 2026-07-28 | `5JSAncTb…dKP` |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `668dc905…fe052a80` | `devnet-v0.6.0` | 2026-08-26 | `5JSAncTb…dKP` |
 
 ### Pool round-trip, verified on devnet
 
@@ -315,8 +316,13 @@ waiting for a real price to move.
 
 ## Milestone 5 — markets and positions
 
-Code complete on `main`, **not deployed**. Devnet still runs `devnet-v0.5.0`,
-which predates all of it.
+Deployed as `devnet-v0.6.0` (2026-08-26) from CI run `32921524835`. On-chain
+bytes verified byte-identical to the CI artifact, `668dc905…fe052a80`.
+
+ProgramData needed extending 524,288 → 767,472 bytes first (~1.69 SOL,
+permanent). Public devnet failed the bulk writes again with `Max retries
+exceeded` — the fourth such failure — and Helius completed the same upload on
+the first attempt. Deploy via a dedicated RPC, not `api.devnet.solana.com`.
 
 | Stage | What | State |
 |---|---|---|
