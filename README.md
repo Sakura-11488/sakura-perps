@@ -7,7 +7,11 @@
 
 Permissionless oracle-and-pool perpetual futures on Solana.
 
-**Status:** milestone 1 of 10 — pipeline established, engine not yet built.
+**Status:** milestone 5 of 10 — markets and positions are live on devnet
+(`devnet-v0.6.0`). Traders can open and close leveraged positions against the
+pool. Funding, borrow fees, liquidation and the keeper are **not built**; there
+is no keeper liquidation at all, so exits currently depend on the position owner
+or the admin. See [What milestone 5 does not settle](#what-milestone-5-does-not-settle).
 
 ---
 
@@ -137,14 +141,17 @@ a legacy community "USDC-Dev" token whose **mint authority is the mint address
 itself**, so nothing can ever mint it and no faucet for it exists or can exist.
 Circle's devnet USDC is `4zMMC9sr…`, which is what faucet.circle.com dispenses.
 
-> **Unresolved: `CollateralMintIsFreezable` blocks real USDC.**
-> `initialize_exchange` rejects any collateral mint carrying a freeze authority
-> (`lib.rs:90`). Verified on devnet against the deployed `devnet-v0.3.0`: it
-> refuses Circle's devnet USDC, and mainnet USDC
-> (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) has freeze authority
-> `7dGbd2QZ…` too. So the program as written can never take USDC on either
-> cluster, which contradicts the collateral decision above. Needs resolving
-> before the pool can be exercised end to end.
+> **Resolved since `devnet-v0.4.0`: freezable collateral is an explicit opt-in.**
+> `initialize_exchange` still refuses a collateral mint carrying a freeze
+> authority *by default*, which used to make USDC unusable on either cluster —
+> Circle's devnet USDC has one, and so does mainnet USDC
+> (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, authority `7dGbd2QZ…`).
+> `InitializeExchangeParams::allow_freezable_collateral` now lets the admin accept
+> it deliberately, once, with the authority recorded on the `Exchange`
+> (`lib.rs:99`). The default stays closed: a freeze authority is a real power over
+> the vault, so taking it on is a decision someone makes on purpose rather than a
+> default nobody read. The M4 pool round-trip was run against Circle's devnet USDC
+> on this path.
 
 ## Deployments
 
@@ -219,20 +226,23 @@ Verified against the real casualty rather than a fixture. The admin wallet
 `tests/devnet-close-stale-escrow.ts` and `tests/devnet-withdraw-position.ts`
 reproduce both halves.
 
-**Still missing: `cancel_withdraw`.** Request a withdrawal that then cannot
-complete — utilisation rising above `max_utilization_bps` is enough — and the
-shares sit in escrow with no way to take them back. `close_stale_escrow` does not
-help, correctly: the escrow is non-empty and the request is live.
+**Resolved: `cancel_withdraw`.** A withdrawal request that then cannot complete
+— utilisation rising above `max_utilization_bps` is enough, and a trader can
+cause it — used to strand the shares in escrow with no way back.
+`close_stale_escrow` correctly refuses that case, since the escrow is non-empty
+and the request is live, so it needed a separate instruction rather than a
+loosened guard. `cancel_withdraw` (`lib.rs:229`) returns the escrowed shares and
+closes the request.
 
 ### Upgrading needs `program extend` first
 
-The pool took the `.so` from 183,024 bytes to **418,896**, which does not fit the
-ProgramData account the earlier deploys allocated — `solana program deploy` fails
-on size before writing anything. Extend first, then deploy:
+Every milestone so far has outgrown its ProgramData allocation, and
+`solana program deploy` fails on size before writing anything. Extend first,
+then deploy. The allocation has gone 183,024 → 524,288 (M4) → **767,472** (M5).
 
 ```bash
-# 183,024 -> 524,288 (512 KiB), leaving headroom for the next milestone
-solana program extend <program-id> 341264 --url "$RPC" -k <deployer>
+# M5: 524,288 -> 767,472, the exact size of the new .so
+solana program extend <program-id> 243184 --url "$RPC" -k <deployer>
 solana program deploy target/deploy/sakura_perps.so \
   --program-id <program-id> --upgrade-authority <deployer> -k <deployer> --url "$RPC"
 ```
@@ -241,16 +251,26 @@ Two things that cost time here. Pass the program **address** to `--program-id`,
 not a keypair path containing spaces — the CLI rejects that as an "unrecognized
 signer source", and for an upgrade the address is what it wants anyway because
 the upgrade authority is the signer. And `solana program dump` returns the whole
-allocation, so the file is padded with zeros to 524,288; truncate to the `.so`
-length before comparing hashes or it will never match:
+allocation, so the file is padded with zeros to the full allocation; truncate to
+the `.so` length before comparing hashes or it will never match:
 
 ```bash
 solana program dump <program-id> onchain.so --url "$RPC"
-head -c 418896 onchain.so | sha256sum   # == the artifact's sha256
+head -c 767472 onchain.so | sha256sum   # == the artifact's sha256
 ```
 
-`devnet-v0.3.0` was verified that way: on-chain bytes are byte-identical to the
-CI artifact from run 30300839145 (`ac1cd48`), and the padding is all zero.
+Every deploy since `devnet-v0.3.0` has been verified that way. For
+`devnet-v0.6.0` the on-chain bytes are byte-identical to the CI artifact from
+run 32921524835 (`c058f40`), sha256 `668dc905…fe052a80`.
+
+**Do not deploy through `api.devnet.solana.com`.** It has now failed the bulk
+writes four times on this program, most recently with `Max retries exceeded`;
+`--use-rpc` does not rescue it. Helius completed the identical upload first try.
+Upload the buffer under a keypair **file** —
+`solana program write-buffer <so> --buffer <file>` — so a partial upload resumes
+instead of restarting and re-paying rent. A stranded buffer is reclaimable via
+its *authority* (`solana program close <addr>`), so funds are never at risk even
+if that file is lost.
 
 ### Oracle validation, verified on devnet
 
@@ -330,9 +350,10 @@ the first attempt. Deploy via a dedicated RPC, not `api.devnet.solana.com`.
 | 1b | the three holes markets make reachable | done — `40fff01` |
 | 2 | `QualifiedFeed`, `Market`, `Position` layouts | done — `2749aaf` |
 | 3 | the eleven instructions | done — `f6d34ee` |
-| 4 | LiteSVM coverage, then deploy | in progress |
+| 4 | LiteSVM coverage, then deploy | done — deployed `devnet-v0.6.0` |
 
-Eleven entry points: `qualify_feed`, `set_feed_revoked`, `create_market`,
+Eleven entry points **added by M5**, bringing the program to 20 in total:
+`qualify_feed`, `set_feed_revoked`, `create_market`,
 `set_risk_params`, `set_pool_limits`, `settle_market`, `refresh_market_price`,
 `open_position`, `close_position`, `admin_settle_position`,
 `emergency_close_position`.
@@ -396,13 +417,62 @@ Every stage-3 field came out of `_reserved` rather than off the end — `Market`
 Six compile-time `INIT_SPACE` asserts hold it there, because growing a struct
 orphans every live devnet account rather than migrating it.
 
+### Compute budget, measured
+
+§9.11 asked for this "before the instruction set is frozen" and stage 3 shipped
+without it. Measured in LiteSVM against the same program bytes now running on
+devnet — `programs/` and `crates/risk` are unchanged between the deployed
+commit `c058f40` and the measurement:
+
+| Instruction | CU | of the 200,000 default |
+|---|---:|---:|
+| `open_position` | 38,905 | 19% |
+| `close_position` | 34,344 | 17% |
+| `emergency_close_position` | 32,694 | 16% |
+| `refresh_market_price` | 9,330 | 4% |
+| `settle_market` | 8,372 | 4% |
+
+Everything fits the default per-instruction budget with roughly 5x headroom, so
+no caller needs a `ComputeBudget` request. `close_position` was the one §9.11
+named as the risk — an oracle read, funding and borrow settlement, fee maths and
+a token-transfer CPI in one instruction — and it lands mid-table.
+
+`the_position_lifecycle_fits_the_default_compute_budget` **asserts** the 200,000
+bound rather than printing and moving on, so this cannot regress quietly once M6
+and M7 add funding, borrow fees and liquidation to these same paths. The exact
+digits are fixture-specific — one position, one market, one price path. The
+margin is not.
+
+### What milestone 5 does not settle
+
+Deploying closes none of the spec's section 9. Ten items were open; §9.11 is now
+answered, leaving nine. (§9.8 is a record of how refuter disagreements were
+adjudicated, not an open item.)
+
+| | Item | State |
+|---|---|---|
+| 9.11 | compute budget never measured | **closed** — above |
+| 9.1 | M1 is bounded, not closed | open |
+| 9.2 | the multi-hour funding farm | open |
+| 9.3 | the reserve grief is priced, not eliminated | open |
+| 9.4 | no keeper liquidation, load-bearing in two places | open — M7/M8 |
+| 9.5 | the staleness option is charged, but not proportionally to age | open |
+| 9.6 | the admin is unrotatable | open |
+| 9.7 | emergency close moves value at a price nobody chose | open |
+| 9.9 | parts still tagged `[RECONSTRUCTED]`, therefore unreviewed | open |
+| 9.10 | no test plan | open |
+
+**9.4 and 9.6 are the two to read before anyone puts real money near this.**
+Without a keeper, liquidation depends on the admin acting; and the admin key
+cannot be rotated. Devnet is the right place for it until both are addressed.
+
 ## Roadmap
 
 - [x] **1** — repo, CI, first devnet deploy
 - [x] **2** — risk core: fixed-point `i128`, zero floats, property tests
 - [x] **3** — oracle adapter with staleness and confidence rejection
 - [x] **4** — collateral vault
-- [ ] **5** — positions: open, close, isolated margin — *code complete, not deployed*
+- [x] **5** — positions: open, close, isolated margin — *deployed `devnet-v0.6.0`*
 - [ ] **6** — funding and borrow fees
 - [ ] **7** — liquidation, insurance fund, bad-debt path
 - [ ] **8** — liquidation keeper
