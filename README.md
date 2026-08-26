@@ -165,6 +165,7 @@ Source-to-bytecode traceability. Every deploy gets a row.
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `5d879e58…07e61d2d` | `devnet-v0.4.0` | 2026-07-28 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `6abbbf6d…fdba2a87` | `devnet-v0.5.0` | 2026-07-28 | `5JSAncTb…dKP` |
 | devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `668dc905…fe052a80` | `devnet-v0.6.0` | 2026-08-26 | `5JSAncTb…dKP` |
+| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `fcc3a2ba…e6973a1e` | `devnet-v0.7.0` | 2026-08-26 | `5JSAncTb…dKP` |
 
 ### Pool round-trip, verified on devnet
 
@@ -238,7 +239,13 @@ closes the request.
 
 Every milestone so far has outgrown its ProgramData allocation, and
 `solana program deploy` fails on size before writing anything. Extend first,
-then deploy. The allocation has gone 183,024 → 524,288 (M4) → **767,472** (M5).
+then deploy. The allocation has gone 183,024 → 524,288 (M4) → 767,472 (M5) →
+**799,704** (permissionless liquidation).
+
+**Size the extend from the CI artifact, never from a local `cargo-build-sbf`
+output.** The two differ — the local build of the same commit came out 716,528
+bytes against the artifact's 799,704 — so a local figure will tell you no extend
+is needed when one is.
 
 ```bash
 # M5: 524,288 -> 767,472, the exact size of the new .so
@@ -466,6 +473,9 @@ adjudicated, not an open item.)
 key cannot be rotated. Devnet is the right place for this until that is addressed.
 
 ### Permissionless liquidation — closing 9.4
+
+Deployed as `devnet-v0.7.0` (2026-08-26), `.so` sha256 `fcc3a2ba…e6973a1e`,
+verified byte-identical on chain.
 
 `liquidate_position` lets **anyone** close an underwater position and be paid for
 it. It settles identically to `admin_settle_position` — same `LIQUIDATE` pause

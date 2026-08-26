@@ -1190,6 +1190,204 @@ export type SakuraPerps = {
       ]
     },
     {
+      "name": "liquidatePosition",
+      "docs": [
+        "Liquidates an underwater position. **Anyone may call this.**",
+        "",
+        "Settles identically to `admin_settle_position` — same pause gate, same",
+        "liquidation guards, same fee and clamps — with two differences: the signer",
+        "is unconstrained, and it is paid `exchange.keeper_fee_share_bps` of the",
+        "liquidation fee that was already being charged.",
+        "",
+        "The safety property is that a solvent position is untouchable: the gate is",
+        "`is_liquidatable` at current notional, and a caller who does not meet it",
+        "gets `PositionNotLiquidatable` regardless of who they are. The trader's",
+        "payout is pinned to the position's own owner, so an arbitrary caller",
+        "cannot redirect it — that constraint is load-bearing here in a way it is",
+        "not on the admin path.",
+        "",
+        "Closes §9.4: with only the admin path, positions decayed past their",
+        "collateral at whatever pace an admin ran, and bad debt accumulated",
+        "unbounded."
+      ],
+      "discriminator": [
+        187,
+        74,
+        229,
+        149,
+        102,
+        81,
+        221,
+        68
+      ],
+      "accounts": [
+        {
+          "name": "exchange",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "keeper",
+          "docs": [
+            "Anyone. That is the point of the instruction — the guard is the position's",
+            "own numbers, not the caller's identity."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "market",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market.feedId",
+                "account": "market"
+              }
+            ]
+          },
+          "relations": [
+            "position"
+          ]
+        },
+        {
+          "name": "priceUpdate"
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Identity is proven by `has_one = owner` on the position below, for the",
+            "same declaration-order reason as [`AdminSettlePosition`]."
+          ],
+          "writable": true,
+          "relations": [
+            "position"
+          ]
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collateralMint"
+        },
+        {
+          "name": "quoteVault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  111,
+                  116,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "ownerTokenAccount",
+          "docs": [
+            "Pinned to the position's owner. See the struct comment: this is the",
+            "constraint that separates a liquidation from a theft."
+          ],
+          "writable": true
+        },
+        {
+          "name": "keeperTokenAccount",
+          "docs": [
+            "Where the keeper's share lands. Constrained to the **signer**, so a caller",
+            "cannot direct their fee into an account they do not control, and cannot",
+            "name the vault or the owner's account to confuse the accounting."
+          ],
+          "writable": true
+        },
+        {
+          "name": "tokenProgram"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "lpDeposit",
       "docs": [
         "Deposits collateral and mints LP shares.",
@@ -2152,6 +2350,69 @@ export type SakuraPerps = {
       ]
     },
     {
+      "name": "setKeeperFeeShare",
+      "docs": [
+        "Sets the keeper's share of the liquidation fee.",
+        "",
+        "Without this the field is write-once at `initialize_exchange`, and the",
+        "exchange already live on devnet predates it — its reserve bytes read 0, so",
+        "every keeper payout branch would be permanently unreachable there and",
+        "`liquidate_position` would ship as an instruction nobody is paid to call.",
+        "A feature that cannot be switched on where it is deployed is not shipped.",
+        "",
+        "Admin-only and re-validated against [`MAX_KEEPER_FEE_SHARE_BPS`] rather",
+        "than trusting the value checked at init: this is the one number that",
+        "decides how much of a liquidation the caller keeps, and it is exactly the",
+        "knob an admin could otherwise turn into a drain on the pool.",
+        "",
+        "Setting it to 0 is legitimate and leaves liquidation permissionless but",
+        "unpaid, which is the state the deployed exchange is in today."
+      ],
+      "discriminator": [
+        190,
+        95,
+        144,
+        133,
+        20,
+        50,
+        68,
+        217
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "bps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
       "name": "setPauseFlags",
       "docs": [
         "Sets the pause bitfield.",
@@ -2568,6 +2829,19 @@ export type SakuraPerps = {
         152,
         210,
         121
+      ]
+    },
+    {
+      "name": "keeperFeeShareChanged",
+      "discriminator": [
+        15,
+        139,
+        68,
+        15,
+        95,
+        185,
+        156,
+        100
       ]
     },
     {
@@ -3101,6 +3375,16 @@ export type SakuraPerps = {
       "code": 6066,
       "name": "openInterestAccountingDrift",
       "msg": "Market's position counters and open interest disagree."
+    },
+    {
+      "code": 6067,
+      "name": "keeperFeeShareTooHigh",
+      "msg": "Keeper fee share exceeds the maximum permitted by the program."
+    },
+    {
+      "code": 6068,
+      "name": "notKeeperTokenOwner",
+      "msg": "Keeper token account must be owned by the keeper signing the liquidation."
     }
   ],
   "types": [
@@ -3146,6 +3430,9 @@ export type SakuraPerps = {
           },
           {
             "name": "emergencyClosed"
+          },
+          {
+            "name": "liquidated"
           }
         ]
       }
@@ -3237,19 +3524,39 @@ export type SakuraPerps = {
             "type": "u32"
           },
           {
+            "name": "keeperFeeShareBps",
+            "docs": [
+              "The keeper's share of a **liquidation** fee, in bps; the remainder splits",
+              "between protocol and LPs exactly as before.",
+              "",
+              "This is a split of the existing fee, never an addition to it. A trader",
+              "being liquidated pays what `liquidation_fee_bps` always charged, so",
+              "enabling keepers cannot reprice a position that is already open.",
+              "",
+              "**Zero is the meaningful default.** The live devnet exchange predates this",
+              "field and its reserve bytes are zero, so it reads 0 and liquidation keeps",
+              "paying the pool exactly as it does today — permissionless liquidation",
+              "still works, keepers just earn nothing until an admin sets a share. An",
+              "uninitialised read failing to \"pay nobody\" rather than \"pay everything\" is",
+              "the direction that cannot lose money."
+            ],
+            "type": "u16"
+          },
+          {
             "name": "reserved",
             "docs": [
               "Anchor has no migration story and fields always get added. Reserve now,",
               "because growing an account later means reallocating every instance.",
               "",
-              "128 originally; `collateral_freeze_authority` was taken from here rather",
-              "than appended, which is what the reserve is for — the account's size is",
-              "unchanged and no existing instance would need reallocating."
+              "128 originally; `collateral_freeze_authority` and `keeper_fee_share_bps`",
+              "were taken from here rather than appended, which is what the reserve is",
+              "for — the account's size is unchanged and no existing instance needs",
+              "reallocating."
             ],
             "type": {
               "array": [
                 "u8",
-                96
+                94
               ]
             }
           }
@@ -3365,6 +3672,15 @@ export type SakuraPerps = {
             "type": "u16"
           },
           {
+            "name": "keeperFeeShareBps",
+            "docs": [
+              "The keeper's cut of a **liquidation** fee in bps, capped at",
+              "[`MAX_KEEPER_FEE_SHARE_BPS`]. A split of the existing fee, never an",
+              "addition to it. Zero means liquidation stays permissionless but unpaid."
+            ],
+            "type": "u16"
+          },
+          {
             "name": "allowFreezableCollateral",
             "docs": [
               "Accept a collateral mint that carries a freeze authority.",
@@ -3412,6 +3728,30 @@ export type SakuraPerps = {
           {
             "name": "maxAumQuote",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "keeperFeeShareChanged",
+      "docs": [
+        "Emitted whenever the keeper's share changes. Worth an event rather than only",
+        "an account diff: it changes who is paid out of every subsequent liquidation."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous",
+            "type": "u16"
+          },
+          {
+            "name": "current",
+            "type": "u16"
           }
         ]
       }
