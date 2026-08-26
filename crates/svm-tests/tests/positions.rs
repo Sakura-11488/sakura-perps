@@ -4601,10 +4601,20 @@ fn a_paused_exchange_stops_keepers_as_well_as_the_admin() {
 
 impl Fixture {
     fn set_keeper_fee_share_ix(&self, bps: u16) -> Instruction {
+        self.set_keeper_fee_share_ix_as(self.admin.pubkey(), bps)
+    }
+
+    /// The same instruction, naming an arbitrary account in the `admin` slot.
+    ///
+    /// Needed for the unauthorised case: that slot is a `Signer`, so naming the
+    /// real admin and then signing with someone else fails at transaction
+    /// CONSTRUCTION with NotEnoughSigners and never reaches the `address =
+    /// exchange.admin` constraint the test exists to prove.
+    fn set_keeper_fee_share_ix_as(&self, admin: Address, bps: u16) -> Instruction {
         Instruction {
             program_id: sakura_perps::ID,
             accounts: sakura_perps::accounts::SetKeeperFeeShare {
-                admin: self.admin.pubkey(),
+                admin,
                 exchange: self.exchange,
             }
             .to_account_metas(None),
@@ -4806,9 +4816,11 @@ fn the_keeper_share_is_admin_only_and_capped() {
         PerpsError::KeeperFeeShareTooHigh,
     );
 
-    // A stranger cannot move it.
+    // A stranger cannot move it. The outsider must occupy the `admin` slot
+    // itself — otherwise the transaction is unsignable and the test would fail
+    // for a reason that has nothing to do with authorisation.
     let (outsider, _) = make_keeper(&mut fixture);
-    let ix = fixture.set_keeper_fee_share_ix(0);
+    let ix = fixture.set_keeper_fee_share_ix_as(outsider.pubkey(), 0);
     let signer = outsider.insecure_clone();
     expect_error(
         fixture.send_meta(ix, &[&signer]).map(|_| ()),
