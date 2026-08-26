@@ -455,16 +455,53 @@ adjudicated, not an open item.)
 | 9.1 | M1 is bounded, not closed | open |
 | 9.2 | the multi-hour funding farm | open |
 | 9.3 | the reserve grief is priced, not eliminated | open |
-| 9.4 | no keeper liquidation, load-bearing in two places | open — M7/M8 |
+| 9.4 | no keeper liquidation, load-bearing in two places | **closed** — `liquidate_position` |
 | 9.5 | the staleness option is charged, but not proportionally to age | open |
 | 9.6 | the admin is unrotatable | open |
 | 9.7 | emergency close moves value at a price nobody chose | open |
 | 9.9 | parts still tagged `[RECONSTRUCTED]`, therefore unreviewed | open |
 | 9.10 | no test plan | open |
 
-**9.4 and 9.6 are the two to read before anyone puts real money near this.**
-Without a keeper, liquidation depends on the admin acting; and the admin key
-cannot be rotated. Devnet is the right place for it until both are addressed.
+**9.6 is now the one to read before anyone puts real money near this.** The admin
+key cannot be rotated. Devnet is the right place for this until that is addressed.
+
+### Permissionless liquidation — closing 9.4
+
+`liquidate_position` lets **anyone** close an underwater position and be paid for
+it. It settles identically to `admin_settle_position` — same `LIQUIDATE` pause
+gate, same liquidation oracle guards, same EMA clamp, same snapshotted spread,
+same `is_liquidatable` gate at *current* notional, same two fee clamps in the
+same order — and differs only in that the signer is unconstrained and takes
+`exchange.keeper_fee_share_bps` of the fee.
+
+**The keeper is paid out of the existing fee, never on top of it.** A liquidated
+trader pays what `liquidation_fee_bps` always charged; only the destination of
+part of it changes, so enabling keepers cannot reprice an open position. The
+share is deducted *before* `book_fee`, because `book_fee`'s guarantee is that its
+parts re-sum to what the vault **kept** — booking the whole fee and paying out
+afterwards would credit liabilities the vault no longer backs and break I1.
+
+`keeper_fee_share_bps` came out of `Exchange::_reserved` (96 → 94), so
+`INIT_SPACE` stays 304 and the live exchange is unaffected. It reads **0** there,
+which means liquidation is permissionless immediately while keepers earn nothing
+until `set_keeper_fee_share` is called. Capped at `MAX_KEEPER_FEE_SHARE_BPS`
+(50%).
+
+Eight tests cover it, including the two that pin the design rather than the
+happy path: at a zero share `liquidate_position` settles byte-for-byte like
+`admin_settle_position` across every payout field and the whole pool ledger —
+the only configuration the deployed exchange is in — and at a non-zero share the
+trader's payout is unchanged while the pool books exactly the keeper's share less.
+
+**Known limits, all pre-mainnet rather than devnet blockers.** A keeper can stamp
+`market.last_good_price` from a price that passed only the looser liquidation
+guards, and `emergency_close_position` settles off that field with no freshness
+gate. Nothing relates `maintenance_margin_bps` to
+`liquidation_max_confidence_bps + spread_bps`, leaving a band where an owner's own
+`close_position` reverts while a keeper succeeds. And because
+`apply_liquidation_fee` clamps the fee against the payout, the keeper earns
+**nothing** on exactly the deep-underwater positions that generate bad debt — so
+9.4's overhang is only partly addressed without a subsidised bot.
 
 ## Roadmap
 
@@ -475,7 +512,7 @@ cannot be rotated. Devnet is the right place for it until both are addressed.
 - [x] **5** — positions: open, close, isolated margin — *deployed `devnet-v0.6.0`*
 - [ ] **6** — funding and borrow fees
 - [ ] **7** — liquidation, insurance fund, bad-debt path
-- [ ] **8** — liquidation keeper
+- [~] **8** — liquidation keeper — *on-chain half shipped (`liquidate_position`); no off-chain bot*
 - [ ] **9** — TypeScript SDK and app integration
 - [ ] **10** — hardening, fuzzing, reproducible builds, audit prep
 
