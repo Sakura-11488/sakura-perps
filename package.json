@@ -5,13 +5,18 @@
   "license": "BUSL-1.1",
   "private": true,
   "scripts": {
-    "lint": "prettier --check 'tests/**/*.ts'",
-    "lint:fix": "prettier --write 'tests/**/*.ts'"
+    "lint": "prettier --check '{tests,keeper}/**/*.ts'",
+    "lint:fix": "prettier --write '{tests,keeper}/**/*.ts'",
+    "keeper:preflight": "ts-node keeper/preflight.ts",
+    "keeper:verify-push": "ts-node keeper/verify-push.ts",
+    "keeper:run": "ts-node keeper/src/run.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
-    "@solana/web3.js": "^1.98.0",
-    "@solana/spl-token": "^0.4.9"
+    "@pythnetwork/hermes-client": "^2.1.0",
+    "@pythnetwork/pyth-solana-receiver": "^0.13.0",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.98.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.5",
@@ -21,7 +26,10 @@
     "mocha": "^10.3.0",
     "prettier": "^3.2.5",
     "ts-mocha": "^10.0.0",
-    "typescript": "^5.4.0",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "overrides": {
+    "@solana/web3.js": "^1.98.0"
   }
 }

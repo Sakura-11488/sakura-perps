@@ -492,10 +492,11 @@ parts re-sum to what the vault **kept** — booking the whole fee and paying out
 afterwards would credit liabilities the vault no longer backs and break I1.
 
 `keeper_fee_share_bps` came out of `Exchange::_reserved` (96 → 94), so
-`INIT_SPACE` stays 304 and the live exchange is unaffected. It reads **0** there,
-which means liquidation is permissionless immediately while keepers earn nothing
-until `set_keeper_fee_share` is called. Capped at `MAX_KEEPER_FEE_SHARE_BPS`
-(50%).
+`INIT_SPACE` stays 304 and the live exchange needed no reallocation — it read
+**0** from its pre-existing reserve bytes, which is why liquidation became
+permissionless the moment v0.7.0 landed while keepers earned nothing. It is now
+set to **2000 (20%)** on devnet via `set_keeper_fee_share`. Capped at
+`MAX_KEEPER_FEE_SHARE_BPS` (50%).
 
 Eight tests cover it, including the two that pin the design rather than the
 happy path: at a zero share `liquidate_position` settles byte-for-byte like

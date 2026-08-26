@@ -2,11 +2,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { SakuraPerps } from "../target/types/sakura_perps";
 import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
-import {
-  TOKEN_2022_PROGRAM_ID,
-  TOKEN_PROGRAM_ID,
-  createMint,
-} from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createMint } from "@solana/spl-token";
 import { assert } from "chai";
 
 /**
@@ -54,12 +50,12 @@ describe("initialize_exchange", () => {
       .initializeExchange({
         feeRecipient,
         protocolFeeShareBps: PROTOCOL_FEE_SHARE_BPS,
+        keeperFeeShareBps: 0,
         allowFreezableCollateral: false,
       })
       .accounts({
         admin: admin.publicKey,
         collateralMint,
-        systemProgram: SystemProgram.programId,
       })
       .rpc();
 
@@ -94,11 +90,15 @@ describe("initialize_exchange", () => {
   it("cannot be initialized twice", async () => {
     try {
       await program.methods
-        .initializeExchange({ feeRecipient, protocolFeeShareBps: PROTOCOL_FEE_SHARE_BPS, allowFreezableCollateral: false })
+        .initializeExchange({
+          feeRecipient,
+          protocolFeeShareBps: PROTOCOL_FEE_SHARE_BPS,
+          keeperFeeShareBps: 0,
+          allowFreezableCollateral: false,
+        })
         .accounts({
           admin: admin.publicKey,
           collateralMint,
-          systemProgram: SystemProgram.programId,
         })
         .rpc();
       assert.fail("second initialize_exchange should have been rejected");

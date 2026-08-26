@@ -26,3 +26,10 @@ keys/
 *.pem
 target-189/
 target-189-clippy/
+
+# Keeper runtime state. Logs can contain position and wallet addresses; the
+# spend ledger and HALT flag are per-deployment, not repo content.
+keeper/logs/
+keeper/.state.json
+keeper/.state.json.tmp
+keeper/HALT
