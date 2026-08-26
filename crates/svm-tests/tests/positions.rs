@@ -403,11 +403,11 @@ impl Fixture {
     /// transactions, and the runtime rejects the second as `AlreadyProcessed`.
     /// That is a deduplication artifact that would masquerade as the property
     /// under test.
-    fn send_meta(
+    fn submit(
         &mut self,
         instruction: Instruction,
         signers: &[&Keypair],
-    ) -> Result<Vec<String>, TransactionError> {
+    ) -> Result<(Vec<String>, u64), TransactionError> {
         self.svm.expire_blockhash();
         let payer = signers[0];
         let transaction = Transaction::new_signed_with_payer(
@@ -418,8 +418,29 @@ impl Fixture {
         );
         self.svm
             .send_transaction(transaction)
-            .map(|meta| meta.logs)
+            .map(|meta| (meta.logs, meta.compute_units_consumed))
             .map_err(|failed| failed.err)
+    }
+
+    fn send_meta(
+        &mut self,
+        instruction: Instruction,
+        signers: &[&Keypair],
+    ) -> Result<Vec<String>, TransactionError> {
+        self.submit(instruction, signers).map(|(logs, _)| logs)
+    }
+
+    /// Compute units the runtime actually charged for one instruction.
+    ///
+    /// The metadata carried this all along and `send_meta` was discarding it,
+    /// which is why spec §9.11 could go unanswered while the suite looked
+    /// thorough — nothing was measuring the one number it asks for.
+    fn send_cu(
+        &mut self,
+        instruction: Instruction,
+        signers: &[&Keypair],
+    ) -> Result<u64, TransactionError> {
+        self.submit(instruction, signers).map(|(_, cu)| cu)
     }
 
     fn send(
@@ -4218,4 +4239,95 @@ fn listing_a_market_is_refused_while_paused_or_revoked() {
         .create_market(OTHER_FEED_ID)
         .expect("with neither gate closed the market lists");
     assert_eq!(fixture.exchange_state().num_markets, 2);
+}
+
+/// Spec §9.11, answered with a number instead of an argument.
+///
+/// The M5 spec says: "Nothing in this document establishes it fits in one
+/// transaction… Measure it in stage 3 before the instruction set is frozen."
+/// Stage 3 shipped without measuring and the instruction set has since been
+/// deployed to devnet, so this is overdue rather than early.
+///
+/// The bound asserted is Solana's DEFAULT per-instruction limit of 200,000 CU —
+/// what a transaction gets when it carries no ComputeBudget instruction.
+/// Exceeding it is not fatal on its own, since a client may request up to
+/// 1,400,000; it means EVERY caller must request more, and one that forgets
+/// fails at runtime rather than at build time. Pinning the default is what makes
+/// that a build-time fact.
+///
+/// Percentages are integer maths deliberately. Floats are banned in this repo,
+/// and while the guardrail currently scans only `*/src`, a test is a poor place
+/// to start depending on that scope holding.
+#[test]
+fn the_position_lifecycle_fits_the_default_compute_budget() {
+    const DEFAULT_CU_LIMIT: u64 = 200_000;
+
+    let mut rows: Vec<(&'static str, u64)> = Vec::new();
+    let mut fixture = Fixture::new(active_params());
+
+    let trader = fixture.trader.insecure_clone();
+    let stranger = fixture.lp.insecure_clone();
+
+    let ix = fixture.open_ix(SIDE_LONG, BIG_SIZE, 1_100 * ONE);
+    let cu = fixture
+        .send_cu(ix, &[&trader])
+        .expect("open must succeed to be measured");
+    rows.push(("open_position", cu));
+
+    let ix = fixture.refresh_market_price_ix();
+    let cu = fixture
+        .send_cu(ix, &[&stranger])
+        .expect("refresh must succeed to be measured");
+    rows.push(("refresh_market_price", cu));
+
+    let ix = Instruction {
+        program_id: sakura_perps::ID,
+        accounts: sakura_perps::accounts::SettleMarket {
+            pool: fixture.pool,
+            market: fixture.market,
+        }
+        .to_account_metas(None),
+        data: sakura_perps::instruction::SettleMarket {}.data(),
+    };
+    let cu = fixture
+        .send_cu(ix, &[&stranger])
+        .expect("settle must succeed to be measured");
+    rows.push(("settle_market", cu));
+
+    // The one §9.11 names as the risk: an oracle read, funding and borrow
+    // settlement, fee maths and a token-transfer CPI in a single instruction.
+    let ix = fixture.close_ix();
+    let cu = fixture
+        .send_cu(ix, &[&trader])
+        .expect("close must succeed to be measured");
+    rows.push(("close_position", cu));
+
+    // Consumes the position, so it needs a fixture of its own.
+    let mut fresh = Fixture::new(active_params());
+    fresh
+        .open(SIDE_LONG, BIG_SIZE, 1_100 * ONE)
+        .expect("open for the emergency path");
+    let admin = fresh.admin.insecure_clone();
+    let ix = fresh.emergency_close_ix();
+    let cu = fresh
+        .send_cu(ix, &[&admin])
+        .expect("emergency close must succeed to be measured");
+    rows.push(("emergency_close_position", cu));
+
+    println!("\ncompute units consumed (default per-instruction limit {DEFAULT_CU_LIMIT}):");
+    for (name, cu) in &rows {
+        let pct = cu * 100 / DEFAULT_CU_LIMIT;
+        println!("  {name:<26} {cu:>7} CU  {pct:>3}% of the default limit");
+    }
+
+    let over: Vec<(&str, u64)> = rows
+        .iter()
+        .copied()
+        .filter(|(_, cu)| *cu >= DEFAULT_CU_LIMIT)
+        .collect();
+    assert!(
+        over.is_empty(),
+        "these do not fit the default compute budget, so every caller would have to send \
+         an explicit ComputeBudget request or fail at runtime: {over:?}"
+    );
 }
