@@ -4356,6 +4356,27 @@ fn the_position_lifecycle_fits_the_default_compute_budget() {
 
 // ── permissionless liquidation ──────────────────────────────────────────────
 
+/// The configuration a liquidation actually needs.
+///
+/// `active_params()` sets initial margin high enough that `BIG_SIZE` needs
+/// ~$1,100 of collateral, and a position that well-margined does not become
+/// liquidatable on the 4.5% move these tests use — opening with less just fails
+/// `InsufficientMargin`. These are the same parameters
+/// `a_late_liquidation_clamps_the_fee_against_the_payout_and_still_closes` uses:
+/// 5% initial margin so $500 of collateral supports exactly $10,000 of notional,
+/// and a zero spread so the figures land exactly rather than to the nearest bp.
+fn liquidatable_params() -> RiskParams {
+    RiskParams {
+        initial_margin_bps: 500,
+        maintenance_margin_bps: 200,
+        liquidation_fee_bps: 100,
+        max_profit_bps: 2_000,
+        spread_bps: 0,
+        max_oracle_drift_bps: 20,
+        ..active_params()
+    }
+}
+
 /// A stranger, funded and holding an empty collateral account.
 fn make_keeper(fixture: &mut Fixture) -> (Keypair, Address) {
     let keeper = Keypair::new();
@@ -4422,10 +4443,10 @@ impl Fixture {
 /// keeper share taken from an unclamped fee would overdraw the vault.
 #[test]
 fn anyone_can_liquidate_an_underwater_position_and_is_paid_for_it() {
-    let mut fixture = Fixture::new(active_params());
+    let mut fixture = Fixture::new(liquidatable_params());
     fixture
-        .open(SIDE_LONG, BIG_SIZE, 550 * ONE)
-        .expect("open a position that can go underwater");
+        .open(SIDE_LONG, BIG_SIZE, 510 * ONE)
+        .expect("open a $10,000 long on $500 of collateral");
     fixture.set_price(9_550);
 
     let (keeper, keeper_token_account) = make_keeper(&mut fixture);
@@ -4505,8 +4526,10 @@ fn a_solvent_position_cannot_be_liquidated_by_a_stranger() {
 /// the position's rent.
 #[test]
 fn a_liquidator_cannot_redirect_the_traders_payout_to_itself() {
-    let mut fixture = Fixture::new(active_params());
-    fixture.open(SIDE_LONG, BIG_SIZE, 550 * ONE).expect("open");
+    let mut fixture = Fixture::new(liquidatable_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 510 * ONE)
+        .expect("open a $10,000 long on $500 of collateral");
     fixture.set_price(9_550);
 
     let (keeper, keeper_token_account) = make_keeper(&mut fixture);
@@ -4526,8 +4549,10 @@ fn a_liquidator_cannot_redirect_the_traders_payout_to_itself() {
 /// the payout a griefing tool rather than an incentive.
 #[test]
 fn a_keeper_cannot_send_its_fee_to_an_account_it_does_not_own() {
-    let mut fixture = Fixture::new(active_params());
-    fixture.open(SIDE_LONG, BIG_SIZE, 550 * ONE).expect("open");
+    let mut fixture = Fixture::new(liquidatable_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 510 * ONE)
+        .expect("open a $10,000 long on $500 of collateral");
     fixture.set_price(9_550);
 
     let (keeper, _keeper_token_account) = make_keeper(&mut fixture);
@@ -4549,8 +4574,10 @@ fn a_keeper_cannot_send_its_fee_to_an_account_it_does_not_own() {
 /// forced exits is one decision, and it should not depend on who is forcing.
 #[test]
 fn a_paused_exchange_stops_keepers_as_well_as_the_admin() {
-    let mut fixture = Fixture::new(active_params());
-    fixture.open(SIDE_LONG, BIG_SIZE, 550 * ONE).expect("open");
+    let mut fixture = Fixture::new(liquidatable_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 510 * ONE)
+        .expect("open a $10,000 long on $500 of collateral");
     fixture.set_price(9_550);
     fixture.set_pause_flags(PauseFlags::LIQUIDATE);
 
