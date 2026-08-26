@@ -200,6 +200,10 @@ impl Fixture {
                 params: InitializeExchangeParams {
                     fee_recipient: self.admin.pubkey(),
                     protocol_fee_share_bps: 1_000,
+                    // No keeper share: this fixture never liquidates, and zero
+                    // keeps every vault assertion reading the same numbers it did
+                    // before keepers existed.
+                    keeper_fee_share_bps: 0,
                     // This fixture's mint has no freeze authority, so the opt-in
                     // is not needed to pass — leaving it closed keeps the guard
                     // under test on the default path.

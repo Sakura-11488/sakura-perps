@@ -29,13 +29,14 @@ use pyth_solana_receiver_sdk::price_update::{PriceFeedMessage, PriceUpdateV2, Ve
 use sakura_perps::market::{Market, QualifiedFeed, QualifyFeedParams, RiskParams};
 use sakura_perps::pool::{InitializePoolParams, Pool};
 use sakura_perps::position::{
-    ClosePositionParams, OpenPositionParams, Position, PositionClosed, SIDE_LONG, SIDE_SHORT,
+    ClosePositionParams, CloseReason, OpenPositionParams, Position, PositionClosed, SIDE_LONG,
+    SIDE_SHORT,
 };
 use sakura_perps::{
-    Exchange, InitializeExchangeParams, PauseFlags, PerpsError, EMERGENCY_CLOSE_DELAY_SECONDS,
-    MAX_ASSET_DECIMALS, MAX_BORROW_RATE_PER_HOUR, MAX_FUNDING_RATE_PER_HOUR,
-    MAX_FUNDING_SENSITIVITY, MAX_RESERVE_LEVERAGE, MAX_SETTLE_WINDOW_SECONDS, MAX_SPREAD_BPS,
-    MAX_TRADE_FEE_BPS,
+    Exchange, InitializeExchangeParams, PauseFlags, PerpsError, BPS_DENOMINATOR,
+    EMERGENCY_CLOSE_DELAY_SECONDS, MAX_ASSET_DECIMALS, MAX_BORROW_RATE_PER_HOUR,
+    MAX_FUNDING_RATE_PER_HOUR, MAX_FUNDING_SENSITIVITY, MAX_RESERVE_LEVERAGE,
+    MAX_SETTLE_WINDOW_SECONDS, MAX_SPREAD_BPS, MAX_TRADE_FEE_BPS,
 };
 use sakura_perps_risk::funding::borrow_index_delta;
 use sakura_perps_risk::oracle::{diverges_beyond, MAX_EXPONENT, MIN_EXPONENT};
@@ -221,6 +222,12 @@ fn feed_params(feed_id: [u8; 32]) -> QualifyFeedParams {
 /// Borrow and funding are switched off so every equity figure below is a
 /// function of the price alone. The one test that needs accrual turns the borrow
 /// rate back on explicitly, and says so.
+/// The keeper's cut of a liquidation fee in this fixture, in bps.
+///
+/// 20%: large enough that a rounding error or a dropped payment is visible in an
+/// assertion, small enough to stay under `MAX_KEEPER_FEE_SHARE_BPS`.
+const KEEPER_FEE_SHARE_BPS: u16 = 2_000;
+
 fn active_params() -> RiskParams {
     RiskParams {
         initial_margin_bps: 1_000,
@@ -465,6 +472,10 @@ impl Fixture {
                 params: InitializeExchangeParams {
                     fee_recipient: self.admin.pubkey(),
                     protocol_fee_share_bps: 1_000,
+                    // Deliberately non-zero. A keeper share of zero would let a
+                    // liquidation test pass while paying the keeper nothing,
+                    // which is exactly the bug worth catching.
+                    keeper_fee_share_bps: KEEPER_FEE_SHARE_BPS,
                     allow_freezable_collateral: false,
                 },
             }
@@ -4340,5 +4351,212 @@ fn the_position_lifecycle_fits_the_default_compute_budget() {
         over.is_empty(),
         "these do not fit the default compute budget, so every caller would have to send \
          an explicit ComputeBudget request or fail at runtime: {over:?}"
+    );
+}
+
+// ── permissionless liquidation ──────────────────────────────────────────────
+
+/// A stranger, funded and holding an empty collateral account.
+fn make_keeper(fixture: &mut Fixture) -> (Keypair, Address) {
+    let keeper = Keypair::new();
+    fixture
+        .svm
+        .airdrop(&keeper.pubkey(), 100 * 1_000_000_000)
+        .unwrap();
+    let account = funded_token_account(
+        &mut fixture.svm,
+        &fixture.collateral_mint,
+        &fixture.admin,
+        &keeper,
+        0,
+    );
+    (keeper, account)
+}
+
+impl Fixture {
+    fn liquidate_ix_with(
+        &self,
+        keeper: &Keypair,
+        keeper_token_account: Address,
+        owner_token_account: Address,
+    ) -> Instruction {
+        Instruction {
+            program_id: sakura_perps::ID,
+            accounts: sakura_perps::accounts::LiquidatePosition {
+                exchange: self.exchange,
+                keeper: keeper.pubkey(),
+                pool: self.pool,
+                market: self.market,
+                price_update: self.price_update,
+                owner: self.trader.pubkey(),
+                position: self.position_key(),
+                collateral_mint: self.collateral_mint,
+                quote_vault: self.quote_vault,
+                owner_token_account,
+                keeper_token_account,
+                token_program: spl_token_id(),
+            }
+            .to_account_metas(None),
+            data: sakura_perps::instruction::LiquidatePosition {}.data(),
+        }
+    }
+
+    fn liquidate(
+        &mut self,
+        keeper: &Keypair,
+        keeper_token_account: Address,
+    ) -> Result<Vec<String>, TransactionError> {
+        let ix = self.liquidate_ix_with(keeper, keeper_token_account, self.trader_token_account);
+        let signer = keeper.insecure_clone();
+        self.send_meta(ix, &[&signer])
+    }
+}
+
+/// The instruction §9.4 asks for: a stranger closes an underwater position and
+/// is paid for it.
+///
+/// The price is the same one the late-liquidation test uses — down 4.5%, equity
+/// decayed to $50 against $500 of collateral, with the fee computed on $9,550 of
+/// current notional and therefore clamped. That case is chosen deliberately: it
+/// is the *ordinary* one once liquidation is permissionless, and it is where a
+/// keeper share taken from an unclamped fee would overdraw the vault.
+#[test]
+fn anyone_can_liquidate_an_underwater_position_and_is_paid_for_it() {
+    let mut fixture = Fixture::new(active_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 550 * ONE)
+        .expect("open a position that can go underwater");
+    fixture.set_price(9_550);
+
+    let (keeper, keeper_token_account) = make_keeper(&mut fixture);
+    let keeper_before = fixture.token_balance(keeper_token_account);
+    let trader_before = fixture.token_balance(fixture.trader_token_account);
+    assert_eq!(keeper_before, 0, "the keeper starts with nothing");
+
+    let logs = fixture
+        .liquidate(&keeper, keeper_token_account)
+        .expect("a stranger must be able to liquidate an underwater position");
+    let closed: PositionClosed = event(&logs);
+
+    assert_eq!(
+        closed.reason,
+        CloseReason::Liquidated,
+        "the permissionless path must be distinguishable from the admin one"
+    );
+
+    // Non-vacuity. A liquidation whose fee clamped to zero would pay the keeper
+    // nothing and this test would pass while proving nothing at all.
+    assert!(
+        closed.liquidation_fee_quote > 0,
+        "the liquidation fee must be non-zero or the keeper assertion is vacuous"
+    );
+
+    let expected_keeper =
+        closed.liquidation_fee_quote * u64::from(KEEPER_FEE_SHARE_BPS) / u64::from(BPS_DENOMINATOR);
+    assert!(expected_keeper > 0, "the keeper's share must be non-zero");
+    assert_eq!(
+        fixture.token_balance(keeper_token_account) - keeper_before,
+        expected_keeper,
+        "the keeper is paid its floored share of the clamped liquidation fee"
+    );
+
+    // The trader still receives the settlement. The keeper's cut comes out of the
+    // fee, not out of what the position was owed.
+    assert_eq!(
+        fixture.token_balance(fixture.trader_token_account) - trader_before,
+        closed.net_payout_quote,
+        "the trader receives the net payout, undiminished by the keeper's fee"
+    );
+
+    fixture.assert_i1("after a permissionless liquidation");
+}
+
+/// The safety property of the whole instruction.
+///
+/// If a solvent position could be closed by a stranger, "permissionless
+/// liquidation" would just be permissionless confiscation. The gate is the
+/// position's own numbers, so an unmoved price must refuse every caller.
+#[test]
+fn a_solvent_position_cannot_be_liquidated_by_a_stranger() {
+    let mut fixture = Fixture::new(active_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 1_100 * ONE)
+        .expect("open a healthy position");
+
+    let (keeper, keeper_token_account) = make_keeper(&mut fixture);
+    expect_error(
+        fixture.liquidate(&keeper, keeper_token_account).map(|_| ()),
+        PerpsError::PositionNotLiquidatable,
+    );
+
+    // Still open, still the trader's.
+    assert_eq!(
+        fixture.position_state().owner,
+        fixture.trader.pubkey(),
+        "a refused liquidation must leave the position untouched"
+    );
+}
+
+/// The constraint that separates a liquidation from a theft.
+///
+/// On the admin path this stops a trusted party redirecting a payout. Here the
+/// caller is an arbitrary stranger, so without it the instruction would pay the
+/// caller the trader's remaining collateral — and the trader would be left with
+/// the position's rent.
+#[test]
+fn a_liquidator_cannot_redirect_the_traders_payout_to_itself() {
+    let mut fixture = Fixture::new(active_params());
+    fixture.open(SIDE_LONG, BIG_SIZE, 550 * ONE).expect("open");
+    fixture.set_price(9_550);
+
+    let (keeper, keeper_token_account) = make_keeper(&mut fixture);
+
+    // Name the keeper's own account as the trader's payout destination.
+    let ix = fixture.liquidate_ix_with(&keeper, keeper_token_account, keeper_token_account);
+    let signer = keeper.insecure_clone();
+    expect_error(
+        fixture.send_meta(ix, &[&signer]).map(|_| ()),
+        PerpsError::NotTokenOwner,
+    );
+}
+
+/// A keeper cannot direct its fee into an account it does not own.
+///
+/// Without this the fee destination is an arbitrary token account, which makes
+/// the payout a griefing tool rather than an incentive.
+#[test]
+fn a_keeper_cannot_send_its_fee_to_an_account_it_does_not_own() {
+    let mut fixture = Fixture::new(active_params());
+    fixture.open(SIDE_LONG, BIG_SIZE, 550 * ONE).expect("open");
+    fixture.set_price(9_550);
+
+    let (keeper, _keeper_token_account) = make_keeper(&mut fixture);
+    let trader_account = fixture.trader_token_account;
+
+    // The trader's account is a valid collateral account — it just is not the
+    // keeper's.
+    let ix = fixture.liquidate_ix_with(&keeper, trader_account, trader_account);
+    let signer = keeper.insecure_clone();
+    expect_error(
+        fixture.send_meta(ix, &[&signer]).map(|_| ()),
+        PerpsError::NotKeeperTokenOwner,
+    );
+}
+
+/// Permissionless does not mean ungoverned: the same pause flag stops it.
+///
+/// `LIQUIDATE` rather than `CLOSE_POSITION`, matching the admin path — pausing
+/// forced exits is one decision, and it should not depend on who is forcing.
+#[test]
+fn a_paused_exchange_stops_keepers_as_well_as_the_admin() {
+    let mut fixture = Fixture::new(active_params());
+    fixture.open(SIDE_LONG, BIG_SIZE, 550 * ONE).expect("open");
+    fixture.set_price(9_550);
+    fixture.set_pause_flags(PauseFlags::LIQUIDATE);
+
+    let (keeper, keeper_token_account) = make_keeper(&mut fixture);
+    expect_error(
+        fixture.liquidate(&keeper, keeper_token_account).map(|_| ()),
+        PerpsError::LiquidationPaused,
     );
 }

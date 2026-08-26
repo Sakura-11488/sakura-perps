@@ -63,6 +63,14 @@ pub const BPS_DENOMINATOR: u16 = 10_000;
 /// an auditor has to raise.
 pub const MAX_PROTOCOL_FEE_SHARE_BPS: u16 = 3_000;
 
+/// Ceiling on the keeper's cut of a liquidation fee.
+///
+/// Half. A keeper only has to be paid enough to cover the transaction and beat
+/// doing nothing; beyond that the fee is being taken from the pool that
+/// underwrote the position. The cap matters because this share is the one number
+/// an admin could otherwise turn into a drain on every liquidation.
+pub const MAX_KEEPER_FEE_SHARE_BPS: u16 = 5_000;
+
 #[program]
 pub mod sakura_perps {
     use super::*;
@@ -84,6 +92,10 @@ pub mod sakura_perps {
         require!(
             params.protocol_fee_share_bps <= MAX_PROTOCOL_FEE_SHARE_BPS,
             PerpsError::ProtocolFeeShareTooHigh
+        );
+        require!(
+            params.keeper_fee_share_bps <= MAX_KEEPER_FEE_SHARE_BPS,
+            PerpsError::KeeperFeeShareTooHigh
         );
 
         let collateral_mint = &ctx.accounts.collateral_mint;
@@ -117,6 +129,7 @@ pub mod sakura_perps {
         // mint. `default()` means none, matching the reserved-field convention.
         exchange.collateral_freeze_authority = freeze_authority.unwrap_or_default();
         exchange.protocol_fee_share_bps = params.protocol_fee_share_bps;
+        exchange.keeper_fee_share_bps = params.keeper_fee_share_bps;
         // Everything starts paused. An exchange that is live the instant it is
         // created is an exchange nobody had a chance to inspect first.
         exchange.paused_flags = PauseFlags::ALL;
@@ -428,6 +441,27 @@ pub mod sakura_perps {
         position::handle_admin_settle_position(ctx)
     }
 
+    /// Liquidates an underwater position. **Anyone may call this.**
+    ///
+    /// Settles identically to `admin_settle_position` — same pause gate, same
+    /// liquidation guards, same fee and clamps — with two differences: the signer
+    /// is unconstrained, and it is paid `exchange.keeper_fee_share_bps` of the
+    /// liquidation fee that was already being charged.
+    ///
+    /// The safety property is that a solvent position is untouchable: the gate is
+    /// `is_liquidatable` at current notional, and a caller who does not meet it
+    /// gets `PositionNotLiquidatable` regardless of who they are. The trader's
+    /// payout is pinned to the position's own owner, so an arbitrary caller
+    /// cannot redirect it — that constraint is load-bearing here in a way it is
+    /// not on the admin path.
+    ///
+    /// Closes §9.4: with only the admin path, positions decayed past their
+    /// collateral at whatever pace an admin ran, and bad debt accumulated
+    /// unbounded.
+    pub fn liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> {
+        position::handle_liquidate_position(ctx)
+    }
+
     /// Winds a position down with **no oracle at all**.
     ///
     /// This is the exit that has to survive everything else failing, so it takes
@@ -530,6 +564,10 @@ pub struct InitializeExchangeParams {
     pub fee_recipient: Pubkey,
     /// Protocol's cut of trading fees in bps; the remainder accrues to LPs.
     pub protocol_fee_share_bps: u16,
+    /// The keeper's cut of a **liquidation** fee in bps, capped at
+    /// [`MAX_KEEPER_FEE_SHARE_BPS`]. A split of the existing fee, never an
+    /// addition to it. Zero means liquidation stays permissionless but unpaid.
+    pub keeper_fee_share_bps: u16,
     /// Accept a collateral mint that carries a freeze authority.
     ///
     /// Defaults closed and has to be set deliberately. Every real USD stablecoin
@@ -592,13 +630,28 @@ pub struct Exchange {
     pub protocol_fee_share_bps: u16,
     /// Number of markets created so far.
     pub num_markets: u32,
+    /// The keeper's share of a **liquidation** fee, in bps; the remainder splits
+    /// between protocol and LPs exactly as before.
+    ///
+    /// This is a split of the existing fee, never an addition to it. A trader
+    /// being liquidated pays what `liquidation_fee_bps` always charged, so
+    /// enabling keepers cannot reprice a position that is already open.
+    ///
+    /// **Zero is the meaningful default.** The live devnet exchange predates this
+    /// field and its reserve bytes are zero, so it reads 0 and liquidation keeps
+    /// paying the pool exactly as it does today — permissionless liquidation
+    /// still works, keepers just earn nothing until an admin sets a share. An
+    /// uninitialised read failing to "pay nobody" rather than "pay everything" is
+    /// the direction that cannot lose money.
+    pub keeper_fee_share_bps: u16,
     /// Anchor has no migration story and fields always get added. Reserve now,
     /// because growing an account later means reallocating every instance.
     ///
-    /// 128 originally; `collateral_freeze_authority` was taken from here rather
-    /// than appended, which is what the reserve is for — the account's size is
-    /// unchanged and no existing instance would need reallocating.
-    pub _reserved: [u8; 96],
+    /// 128 originally; `collateral_freeze_authority` and `keeper_fee_share_bps`
+    /// were taken from here rather than appended, which is what the reserve is
+    /// for — the account's size is unchanged and no existing instance needs
+    /// reallocating.
+    pub _reserved: [u8; 94],
 }
 
 // Frozen. There is a live devnet exchange, and `InitSpace` is the only place
@@ -781,6 +834,10 @@ pub enum PerpsError {
     PriceDiverged,
     #[msg("Position is not liquidatable at the current price.")]
     PositionNotLiquidatable,
+    #[msg("Keeper fee share exceeds the maximum permitted by the program.")]
+    KeeperFeeShareTooHigh,
+    #[msg("Keeper token account must be owned by the keeper signing the liquidation.")]
+    NotKeeperTokenOwner,
     #[msg("Utilisation ceiling is outside the range the program permits.")]
     UtilizationCeilingTooHigh,
     // Not in the specification's variant list, which never defines

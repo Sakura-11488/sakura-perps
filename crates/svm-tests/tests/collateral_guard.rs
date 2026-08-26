@@ -122,6 +122,7 @@ fn initialize(env: &mut Env, allow_freezable: bool) -> Result<(), TransactionErr
             params: InitializeExchangeParams {
                 fee_recipient: env.admin.pubkey(),
                 protocol_fee_share_bps: 1_000,
+                keeper_fee_share_bps: 0,
                 allow_freezable_collateral: allow_freezable,
             },
         }

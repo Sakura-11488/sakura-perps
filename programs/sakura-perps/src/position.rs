@@ -131,6 +131,13 @@ pub enum CloseReason {
     AdminSettled,
     /// An admin wound it down with no oracle at all.
     EmergencyClosed,
+    /// Anyone liquidated it, permissionlessly, under the liquidation guards.
+    ///
+    /// Distinct from `AdminSettled` on purpose: the two paths settle identically
+    /// but say different things about the venue. A book being liquidated by
+    /// strangers is working; a book only the admin ever liquidates is one where
+    /// the incentive is broken or the share is set to zero.
+    Liquidated,
 }
 
 #[event]
@@ -447,6 +454,7 @@ fn apply_close_ledger(
     position: &Position,
     settled: &LiquidatedSettlement,
     protocol_fee_share_bps: u16,
+    keeper_fee_quote: u64,
 ) -> Result<()> {
     // Trader collateral leaves the pot it was held in. `checked_sub` on the
     // market slice as well as the pool total: a market releasing more than it
@@ -520,7 +528,23 @@ fn apply_close_ledger(
     // B1. Both figures are settlement **outputs**, already clamped against the
     // payout by `settle_close` and `apply_liquidation_fee`. See [`book_fee`].
     book_fee(pool, settled.close_fee_quote, protocol_fee_share_bps)?;
-    book_fee(pool, settled.liquidation_fee_quote, protocol_fee_share_bps)?;
+    // The keeper's cut is deducted BEFORE booking, never paid on top of it.
+    //
+    // `book_fee`'s guarantee is that its two parts re-sum to exactly what the
+    // vault KEPT. A keeper is paid out of the vault, so their share is precisely
+    // what the vault did not keep — booking the whole fee and then transferring
+    // the keeper's cut would credit liabilities the vault no longer backs, and I1
+    // (`quote_vault.amount >= quote_deposited + locked_quote +
+    // pending_protocol_fees`) would fail on the very next assertion.
+    //
+    // `checked_sub` rather than a clamp: the caller derives `keeper_fee_quote`
+    // from this same figure, so a value exceeding it is a caller bug and turning
+    // it into a silent zero would hide one.
+    let booked_liquidation_fee = settled
+        .liquidation_fee_quote
+        .checked_sub(u128::from(keeper_fee_quote))
+        .ok_or(PerpsError::MathOverflow)?;
+    book_fee(pool, booked_liquidation_fee, protocol_fee_share_bps)?;
 
     // Recorded on the market, never socialised across liquidity providers.
     market.cum_bad_debt_usd = market
@@ -988,6 +1012,7 @@ pub fn handle_close_position(
         &ctx.accounts.position,
         &settled,
         protocol_fee_share_bps,
+        0,
     )?;
 
     // 10. Transfer, then announce, then assert. The order matters: I1 compares
@@ -1186,6 +1211,7 @@ pub fn handle_admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result
         &ctx.accounts.position,
         &settled,
         protocol_fee_share_bps,
+        0,
     )?;
 
     pay_owner(
@@ -1320,6 +1346,7 @@ pub fn handle_emergency_close_position(ctx: Context<EmergencyClosePosition>) -> 
         &ctx.accounts.position,
         &settled,
         protocol_fee_share_bps,
+        0,
     )?;
 
     pay_owner(
@@ -1642,6 +1669,282 @@ pub struct EmergencyClosePosition<'info> {
 /// The account plumbing is not simulated. `apply_open_ledger` and
 /// `apply_close_ledger` are the whole of the arithmetic that can break I1, which
 /// is why they are functions rather than blocks inside their handlers.
+/// Accounts for [`crate::sakura_perps::liquidate_position`].
+///
+/// [`AdminSettlePosition`]'s, with the admin replaced by **any** signer plus a
+/// destination for that signer's share of the fee.
+///
+/// The `owner_token_account` constraint carries more weight here than on the
+/// admin path. There it stops a trusted party redirecting a payout; here the
+/// caller is an arbitrary stranger, and without it this would be an open
+/// instruction that pays the caller the trader's remaining collateral.
+#[derive(Accounts)]
+pub struct LiquidatePosition<'info> {
+    #[account(seeds = [b"exchange"], bump = exchange.bump)]
+    pub exchange: Box<Account<'info, Exchange>>,
+
+    /// Anyone. That is the point of the instruction — the guard is the position's
+    /// own numbers, not the caller's identity.
+    #[account(mut)]
+    pub keeper: Signer<'info>,
+
+    #[account(mut, seeds = [b"pool"], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut, seeds = [b"market", market.feed_id.as_ref()], bump = market.bump)]
+    pub market: Box<Account<'info, Market>>,
+
+    #[account(address = market.price_update @ PerpsError::WrongPriceUpdate)]
+    pub price_update: Box<Account<'info, PriceUpdateV2>>,
+
+    /// CHECK: never read, only credited with the closed position's rent.
+    /// Identity is proven by `has_one = owner` on the position below, for the
+    /// same declaration-order reason as [`AdminSettlePosition`].
+    #[account(mut)]
+    pub owner: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        close = owner,
+        has_one = owner @ PerpsError::NotPositionOwner,
+        has_one = market @ PerpsError::WrongMarket,
+        seeds = [b"position", market.key().as_ref(), owner.key().as_ref()],
+        bump = position.bump,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(address = exchange.collateral_mint @ PerpsError::WrongCollateralMint)]
+    pub collateral_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(
+        mut,
+        seeds = [b"quote_vault"],
+        bump = pool.vault_bump,
+        token::mint = collateral_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub quote_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// Pinned to the position's owner. See the struct comment: this is the
+    /// constraint that separates a liquidation from a theft.
+    #[account(
+        mut,
+        constraint = owner_token_account.mint == exchange.collateral_mint @ PerpsError::WrongCollateralMint,
+        constraint = owner_token_account.owner == position.owner @ PerpsError::NotTokenOwner,
+    )]
+    pub owner_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// Where the keeper's share lands. Constrained to the **signer**, so a caller
+    /// cannot direct their fee into an account they do not control, and cannot
+    /// name the vault or the owner's account to confuse the accounting.
+    #[account(
+        mut,
+        constraint = keeper_token_account.mint == exchange.collateral_mint @ PerpsError::WrongCollateralMint,
+        constraint = keeper_token_account.owner == keeper.key() @ PerpsError::NotKeeperTokenOwner,
+    )]
+    pub keeper_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = exchange.collateral_token_program @ PerpsError::WrongTokenProgram)]
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+/// Liquidate an underwater position. Permissionless.
+///
+/// Settles exactly as [`handle_admin_settle_position`] does — same gate, same
+/// guards, same price, same fee, same clamps — and differs in two ways only:
+/// anyone may call it, and the caller is paid a share of the fee that was
+/// already being charged.
+///
+/// **Why this exists.** §9.4 of the M5 spec: with `admin_settle_position` as the
+/// only liquidation path, positions decay past their collateral at whatever pace
+/// an admin runs, `cum_bad_debt_usd` grows unbounded, and the fee clamp that
+/// exists for late liquidations becomes the routine case rather than the edge.
+/// The spec's own conclusion is to ship permissionless liquidation *before* M6's
+/// mark, because an unrealised bad-debt overhang makes even a correct
+/// per-position mark understate the pool's liability.
+///
+/// **The keeper is paid out of the existing fee, never on top of it.** A trader
+/// being liquidated pays what `liquidation_fee_bps` always charged; only the
+/// destination of part of it changes. Enabling keepers therefore cannot reprice
+/// a position that is already open.
+pub fn handle_liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> {
+    let clock = Clock::get()?;
+    let collateral_decimals = ctx.accounts.exchange.collateral_decimals;
+    let protocol_fee_share_bps = ctx.accounts.exchange.protocol_fee_share_bps;
+    let keeper_fee_share_bps = ctx.accounts.exchange.keeper_fee_share_bps;
+
+    // 1. The same gate as the admin path, and deliberately the same flag:
+    //    pausing forced exits is one decision, and it should not depend on who is
+    //    doing the forcing. No quarantine or revocation check — a market that has
+    //    stopped taking new risk must still be able to shed what it holds.
+    require!(
+        ctx.accounts.exchange.paused_flags & PauseFlags::LIQUIDATE == 0,
+        PerpsError::LiquidationPaused
+    );
+
+    // 2. Accrue before judging solvency, or the gate reads an equity that ignores
+    //    money the position already owes.
+    crate::market::accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)?;
+
+    // 3. Liquidation guards, clamped into the EMA band. Refusing to liquidate is
+    //    not a safe default: a position the pool cannot close is one it
+    //    underwrites for free while the loss grows.
+    let (price, ema) = crate::oracle::load_price_and_ema(
+        &ctx.accounts.price_update,
+        &ctx.accounts.market.feed_id,
+        &ctx.accounts.market.liquidation_guards(),
+        &clock,
+    )?;
+    let clamped =
+        crate::market::clamp_to_ema_band(&price, ema, ctx.accounts.market.max_divergence_bps)?;
+    let mid = clamped.mid;
+
+    ctx.accounts.market.last_good_price = mid;
+    ctx.accounts.market.last_good_price_ts = clock.unix_timestamp;
+
+    // 4. The position's snapshotted spread, not the market's live one. It matters
+    //    more here than anywhere: the caller is a stranger who profits from this
+    //    liquidation happening, so pricing off anything movable between open and
+    //    close would hand them the difference.
+    let side = ctx.accounts.position.risk_side();
+    let exit_price = execution_price(
+        side,
+        PriceDirection::Close,
+        mid,
+        clamped.confidence,
+        ctx.accounts.position.spread_bps,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+
+    // 5. Shared with the ordinary close and the admin path, so no two exits can
+    //    disagree about what a position was worth.
+    let valuation = value_close(
+        &ctx.accounts.position,
+        &ctx.accounts.market,
+        collateral_decimals,
+        exit_price,
+    )?;
+
+    // 5b. The gate, at CURRENT notional. This is the whole safety property of a
+    //     permissionless instruction: a solvent position must be untouchable by a
+    //     stranger. Ties go to the pool (`equity <= requirement`), and the figure
+    //     is struck off the clamped mid rather than the execution price, so
+    //     neither the gate nor the fee below depends on the spread this
+    //     particular position happens to carry.
+    let current_notional_usd = notional_usd_ceil(
+        u128::from(ctx.accounts.position.size_base),
+        mid,
+        ctx.accounts.market.asset_decimals,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+    require!(
+        is_liquidatable(
+            valuation.equity_usd,
+            current_notional_usd,
+            ctx.accounts.position.maintenance_margin_bps,
+        )
+        .map_err(crate::oracle::map_risk_error)?,
+        PerpsError::PositionNotLiquidatable
+    );
+
+    // 6. The fee, with both clamps in the fixed order: against remaining
+    //    collateral first, so a liquidation cannot manufacture bad debt, then
+    //    against what the close fee left of the payout.
+    let collateral_remaining_usd = quote_to_usd_floor(
+        u128::from(ctx.accounts.position.collateral_quote),
+        collateral_decimals,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+    let liq_fee_usd = liquidation_fee(
+        current_notional_usd,
+        ctx.accounts.position.liquidation_fee_bps,
+        collateral_remaining_usd,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+
+    let settled = apply_liquidation_fee(valuation.settlement, liq_fee_usd, collateral_decimals)
+        .map_err(crate::oracle::map_risk_error)?;
+    let amounts = SettledQuote::narrow(&settled)?;
+
+    // 6b. The keeper's cut, taken out of the CLAMPED fee rather than the notional
+    //     one. Both clamps have already run, so this can never exceed what the
+    //     vault actually retained — a keeper cannot be paid out of a fee that was
+    //     clamped away to nothing, which is the ordinary late-liquidation case
+    //     and the one B3 exists for.
+    //
+    //     `fee_split_quote` is reused rather than reimplemented: floored first
+    //     share, remainder takes the rest, re-summing to the input by
+    //     construction, and already property-tested. The keeper takes the floored
+    //     side, so rounding dust favours the pool.
+    let keeper_fee_quote = to_u64(
+        fee_split_quote(settled.liquidation_fee_quote, keeper_fee_share_bps)
+            .map_err(crate::oracle::map_risk_error)?
+            .protocol_quote,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+
+    let utilisation_before = UtilisationCheck::NotWorsened {
+        reserved_quote: ctx.accounts.pool.reserved_quote,
+        quote_deposited: ctx.accounts.pool.quote_deposited,
+    };
+
+    // 7. The ledger books the fee MINUS the keeper's cut, because that cut is
+    //    leaving the vault rather than staying in it.
+    apply_close_ledger(
+        &mut ctx.accounts.pool,
+        &mut ctx.accounts.market,
+        &ctx.accounts.position,
+        &settled,
+        protocol_fee_share_bps,
+        keeper_fee_quote,
+    )?;
+
+    // 8. The trader first, then the keeper. The order is not cosmetic: the
+    //    trader's payout is an obligation and the keeper's is a fee, so if the
+    //    vault could satisfy only one it must be the obligation.
+    pay_owner(
+        &ctx.accounts.pool,
+        &ctx.accounts.quote_vault,
+        &ctx.accounts.collateral_mint,
+        &ctx.accounts.owner_token_account,
+        &ctx.accounts.token_program,
+        amounts.net_payout_quote,
+    )?;
+
+    pay_owner(
+        &ctx.accounts.pool,
+        &ctx.accounts.quote_vault,
+        &ctx.accounts.collateral_mint,
+        &ctx.accounts.keeper_token_account,
+        &ctx.accounts.token_program,
+        keeper_fee_quote,
+    )?;
+
+    emit!(PositionClosed {
+        market: ctx.accounts.market.key(),
+        owner: ctx.accounts.position.owner,
+        position: ctx.accounts.position.key(),
+        reason: CloseReason::Liquidated,
+        exit_price,
+        gross_payout_quote: amounts.gross_payout_quote,
+        close_fee_quote: amounts.close_fee_quote,
+        liquidation_fee_quote: amounts.liquidation_fee_quote,
+        net_payout_quote: amounts.net_payout_quote,
+        profit_capped: settled.profit_capped,
+        bad_debt_usd: settled.bad_debt_usd,
+    });
+
+    ctx.accounts.quote_vault.reload()?;
+    let market_ref: &Market = &ctx.accounts.market;
+    assert_pool_invariants(
+        &ctx.accounts.quote_vault,
+        &ctx.accounts.pool,
+        Some(market_ref),
+        utilisation_before,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1807,6 +2110,7 @@ mod tests {
             &open.position,
             &settled,
             protocol_share_bps,
+            0,
         )
         .unwrap();
         let net_payout_quote = to_u64(settled.net_payout_quote).unwrap();
