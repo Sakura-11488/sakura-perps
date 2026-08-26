@@ -35,8 +35,8 @@ use sakura_perps::position::{
 use sakura_perps::{
     Exchange, InitializeExchangeParams, PauseFlags, PerpsError, BPS_DENOMINATOR,
     EMERGENCY_CLOSE_DELAY_SECONDS, MAX_ASSET_DECIMALS, MAX_BORROW_RATE_PER_HOUR,
-    MAX_FUNDING_RATE_PER_HOUR, MAX_FUNDING_SENSITIVITY, MAX_RESERVE_LEVERAGE,
-    MAX_SETTLE_WINDOW_SECONDS, MAX_SPREAD_BPS, MAX_TRADE_FEE_BPS,
+    MAX_FUNDING_RATE_PER_HOUR, MAX_FUNDING_SENSITIVITY, MAX_KEEPER_FEE_SHARE_BPS,
+    MAX_RESERVE_LEVERAGE, MAX_SETTLE_WINDOW_SECONDS, MAX_SPREAD_BPS, MAX_TRADE_FEE_BPS,
 };
 use sakura_perps_risk::funding::borrow_index_delta;
 use sakura_perps_risk::oracle::{diverges_beyond, MAX_EXPONENT, MIN_EXPONENT};
@@ -4596,5 +4596,228 @@ fn a_paused_exchange_stops_keepers_as_well_as_the_admin() {
     expect_error(
         fixture.liquidate(&keeper, keeper_token_account).map(|_| ()),
         PerpsError::LiquidationPaused,
+    );
+}
+
+impl Fixture {
+    fn set_keeper_fee_share_ix(&self, bps: u16) -> Instruction {
+        Instruction {
+            program_id: sakura_perps::ID,
+            accounts: sakura_perps::accounts::SetKeeperFeeShare {
+                admin: self.admin.pubkey(),
+                exchange: self.exchange,
+            }
+            .to_account_metas(None),
+            data: sakura_perps::instruction::SetKeeperFeeShare { bps }.data(),
+        }
+    }
+
+    fn set_keeper_fee_share(&mut self, bps: u16) -> Result<(), TransactionError> {
+        let instruction = self.set_keeper_fee_share_ix(bps);
+        let admin = self.admin.insecure_clone();
+        self.send(instruction, &[&admin])
+    }
+}
+
+/// A ledger snapshot, so two settlement paths can be compared field by field
+/// rather than by whichever one number a test happened to look at.
+#[derive(Debug, PartialEq, Eq)]
+struct LedgerSnapshot {
+    quote_deposited: u64,
+    locked_quote: u64,
+    reserved_quote: u64,
+    pending_protocol_fees: u64,
+    cum_bad_debt_usd: u128,
+}
+
+fn ledger(fixture: &Fixture) -> LedgerSnapshot {
+    let pool = fixture.pool_state();
+    LedgerSnapshot {
+        quote_deposited: pool.quote_deposited,
+        locked_quote: pool.locked_quote,
+        reserved_quote: pool.reserved_quote,
+        pending_protocol_fees: pool.pending_protocol_fees,
+        cum_bad_debt_usd: fixture.market_state().cum_bad_debt_usd,
+    }
+}
+
+/// Open the same position, at the same price, in a fresh fixture.
+fn underwater_fixture() -> Fixture {
+    let mut fixture = Fixture::new(liquidatable_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 510 * ONE)
+        .expect("open a $10,000 long on $500 of collateral");
+    fixture.set_price(9_550);
+    fixture
+}
+
+/// The claim the whole design rests on, pinned against the admin baseline.
+///
+/// `liquidate_position` is supposed to settle *identically* to
+/// `admin_settle_position`, differing only in who may call it and in the keeper's
+/// carve-out. At `keeper_fee_share_bps = 0` there is no carve-out, so the two
+/// paths must agree on every payout field and every ledger line exactly.
+///
+/// This is the configuration that matters most in practice: the exchange already
+/// deployed to devnet reads 0 from its reserve bytes, so **zero is the only share
+/// it has**, and until this test existed nothing exercised `liquidate_position`
+/// in the one state the live program is actually in. Every other liquidation test
+/// runs at 2000 bps.
+#[test]
+fn at_a_zero_keeper_share_liquidation_settles_exactly_like_the_admin_path() {
+    // Baseline: the admin path.
+    let mut admin_side = underwater_fixture();
+    let admin_logs = admin_side.admin_settle().expect("admin settle");
+    let admin_closed: PositionClosed = event(&admin_logs);
+    let admin_ledger = ledger(&admin_side);
+
+    // The permissionless path, with the carve-out switched off.
+    let mut keeper_side = underwater_fixture();
+    keeper_side
+        .set_keeper_fee_share(0)
+        .expect("the admin can set the keeper share");
+    let (keeper, keeper_token_account) = make_keeper(&mut keeper_side);
+    let keeper_logs = keeper_side
+        .liquidate(&keeper, keeper_token_account)
+        .expect("liquidate");
+    let keeper_closed: PositionClosed = event(&keeper_logs);
+
+    // Non-vacuity: a settlement where everything is zero would satisfy every
+    // equality below while proving nothing.
+    assert!(
+        admin_closed.gross_payout_quote > 0 && admin_closed.liquidation_fee_quote > 0,
+        "the baseline must actually move money"
+    );
+
+    assert_eq!(
+        keeper_closed.exit_price, admin_closed.exit_price,
+        "same price"
+    );
+    assert_eq!(
+        keeper_closed.gross_payout_quote, admin_closed.gross_payout_quote,
+        "same gross"
+    );
+    assert_eq!(
+        keeper_closed.close_fee_quote, admin_closed.close_fee_quote,
+        "same close fee"
+    );
+    assert_eq!(
+        keeper_closed.liquidation_fee_quote, admin_closed.liquidation_fee_quote,
+        "same liquidation fee"
+    );
+    assert_eq!(
+        keeper_closed.net_payout_quote, admin_closed.net_payout_quote,
+        "the trader receives the same amount either way"
+    );
+    assert_eq!(
+        keeper_closed.bad_debt_usd, admin_closed.bad_debt_usd,
+        "same bad debt"
+    );
+
+    assert_eq!(
+        ledger(&keeper_side),
+        admin_ledger,
+        "at a zero keeper share the two paths must leave the pool in the same state"
+    );
+
+    // And the keeper genuinely got nothing, rather than the test having compared
+    // two runs that both silently paid one.
+    assert_eq!(
+        keeper_side.token_balance(keeper_token_account),
+        0,
+        "a zero share must pay the keeper nothing"
+    );
+}
+
+/// The keeper's cut comes OUT of the liquidation fee, not on top of it.
+///
+/// Design claim 1, pinned against the same admin baseline: at a non-zero share
+/// the trader must still receive exactly what the admin path would have paid
+/// them, and the fee the pool books must fall by precisely what the keeper took.
+/// If the keeper were paid additionally, the trader's payout or the pool's
+/// booking would differ.
+#[test]
+fn the_keeper_is_paid_out_of_the_fee_and_not_on_top_of_it() {
+    let mut admin_side = underwater_fixture();
+    let admin_logs = admin_side.admin_settle().expect("admin settle");
+    let admin_closed: PositionClosed = event(&admin_logs);
+    let admin_ledger = ledger(&admin_side);
+
+    let mut keeper_side = underwater_fixture();
+    let (keeper, keeper_token_account) = make_keeper(&mut keeper_side);
+    let keeper_logs = keeper_side
+        .liquidate(&keeper, keeper_token_account)
+        .expect("liquidate");
+    let keeper_closed: PositionClosed = event(&keeper_logs);
+    let keeper_ledger = ledger(&keeper_side);
+
+    let paid = keeper_side.token_balance(keeper_token_account);
+    assert!(
+        paid > 0,
+        "the keeper must actually be paid or this proves nothing"
+    );
+
+    // The trader is unaffected by the keeper's existence.
+    assert_eq!(
+        keeper_closed.net_payout_quote, admin_closed.net_payout_quote,
+        "the trader's payout must not depend on who liquidated them"
+    );
+    assert_eq!(
+        keeper_closed.liquidation_fee_quote, admin_closed.liquidation_fee_quote,
+        "the fee CHARGED is the same; only its destination differs"
+    );
+
+    // The pool books exactly the keeper's share less. `book_fee` splits between
+    // pending_protocol_fees and quote_deposited, so the shortfall shows up across
+    // the two of them together.
+    let admin_booked = admin_ledger.pending_protocol_fees + admin_ledger.quote_deposited;
+    let keeper_booked = keeper_ledger.pending_protocol_fees + keeper_ledger.quote_deposited;
+    assert_eq!(
+        admin_booked - keeper_booked,
+        paid,
+        "the pool must book exactly what the keeper took away, no more and no less"
+    );
+}
+
+/// The share is admin-only and capped.
+///
+/// It decides how much of every liquidation the caller keeps, so an uncapped or
+/// unguarded setter would be the one knob that turns liquidation into a drain.
+#[test]
+fn the_keeper_share_is_admin_only_and_capped() {
+    let mut fixture = Fixture::new(liquidatable_params());
+
+    assert_eq!(
+        fixture.exchange_state().keeper_fee_share_bps,
+        KEEPER_FEE_SHARE_BPS,
+        "the fixture starts at its configured share"
+    );
+
+    fixture
+        .set_keeper_fee_share(MAX_KEEPER_FEE_SHARE_BPS)
+        .expect("the ceiling itself must be settable");
+    assert_eq!(
+        fixture.exchange_state().keeper_fee_share_bps,
+        MAX_KEEPER_FEE_SHARE_BPS
+    );
+
+    expect_error(
+        fixture.set_keeper_fee_share(MAX_KEEPER_FEE_SHARE_BPS + 1),
+        PerpsError::KeeperFeeShareTooHigh,
+    );
+
+    // A stranger cannot move it.
+    let (outsider, _) = make_keeper(&mut fixture);
+    let ix = fixture.set_keeper_fee_share_ix(0);
+    let signer = outsider.insecure_clone();
+    expect_error(
+        fixture.send_meta(ix, &[&signer]).map(|_| ()),
+        PerpsError::NotAdmin,
+    );
+
+    assert_eq!(
+        fixture.exchange_state().keeper_fee_share_bps,
+        MAX_KEEPER_FEE_SHARE_BPS,
+        "a refused write must leave the share where it was"
     );
 }

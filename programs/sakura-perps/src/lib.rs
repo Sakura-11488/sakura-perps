@@ -269,6 +269,40 @@ pub mod sakura_perps {
         Ok(())
     }
 
+    /// Sets the keeper's share of the liquidation fee.
+    ///
+    /// Without this the field is write-once at `initialize_exchange`, and the
+    /// exchange already live on devnet predates it — its reserve bytes read 0, so
+    /// every keeper payout branch would be permanently unreachable there and
+    /// `liquidate_position` would ship as an instruction nobody is paid to call.
+    /// A feature that cannot be switched on where it is deployed is not shipped.
+    ///
+    /// Admin-only and re-validated against [`MAX_KEEPER_FEE_SHARE_BPS`] rather
+    /// than trusting the value checked at init: this is the one number that
+    /// decides how much of a liquidation the caller keeps, and it is exactly the
+    /// knob an admin could otherwise turn into a drain on the pool.
+    ///
+    /// Setting it to 0 is legitimate and leaves liquidation permissionless but
+    /// unpaid, which is the state the deployed exchange is in today.
+    pub fn set_keeper_fee_share(ctx: Context<SetKeeperFeeShare>, bps: u16) -> Result<()> {
+        require!(
+            bps <= MAX_KEEPER_FEE_SHARE_BPS,
+            PerpsError::KeeperFeeShareTooHigh
+        );
+
+        let exchange = &mut ctx.accounts.exchange;
+        let previous = exchange.keeper_fee_share_bps;
+        exchange.keeper_fee_share_bps = bps;
+
+        emit!(KeeperFeeShareChanged {
+            exchange: exchange.key(),
+            previous,
+            current: bps,
+        });
+
+        Ok(())
+    }
+
     /// Declares a Pyth feed safe to price markets against.
     ///
     /// Admin-only, and the single point at which oracle risk enters the
@@ -491,6 +525,24 @@ pub struct SetPauseFlags<'info> {
 
     #[account(mut, seeds = [b"exchange"], bump = exchange.bump)]
     pub exchange: Box<Account<'info, Exchange>>,
+}
+
+#[derive(Accounts)]
+pub struct SetKeeperFeeShare<'info> {
+    #[account(address = exchange.admin @ PerpsError::NotAdmin)]
+    pub admin: Signer<'info>,
+
+    #[account(mut, seeds = [b"exchange"], bump = exchange.bump)]
+    pub exchange: Box<Account<'info, Exchange>>,
+}
+
+/// Emitted whenever the keeper's share changes. Worth an event rather than only
+/// an account diff: it changes who is paid out of every subsequent liquidation.
+#[event]
+pub struct KeeperFeeShareChanged {
+    pub exchange: Pubkey,
+    pub previous: u16,
+    pub current: u16,
 }
 
 /// Emitted whenever the pause bitfield changes, so the transition is auditable
@@ -834,10 +886,6 @@ pub enum PerpsError {
     PriceDiverged,
     #[msg("Position is not liquidatable at the current price.")]
     PositionNotLiquidatable,
-    #[msg("Keeper fee share exceeds the maximum permitted by the program.")]
-    KeeperFeeShareTooHigh,
-    #[msg("Keeper token account must be owned by the keeper signing the liquidation.")]
-    NotKeeperTokenOwner,
     #[msg("Utilisation ceiling is outside the range the program permits.")]
     UtilizationCeilingTooHigh,
     // Not in the specification's variant list, which never defines
@@ -856,4 +904,16 @@ pub enum PerpsError {
     MarketSliceExceedsPool,
     #[msg("Market's position counters and open interest disagree.")]
     OpenInterestAccountingDrift,
+
+    // Appended, and this is the end of the enum — check that before adding more.
+    // Anchor numbers variants by position, so a variant inserted anywhere above
+    // renumbers every one after it. The first version of these two sat after
+    // `PositionNotLiquidatable`, which is NOT last, and silently shifted
+    // UtilizationCeilingTooHigh, InvalidPositionSide, MarketSliceExceedsPool and
+    // OpenInterestAccountingDrift from 6063-6066 to 6065-6068 — so any client on
+    // the previous IDL would have decoded four errors under the wrong names.
+    #[msg("Keeper fee share exceeds the maximum permitted by the program.")]
+    KeeperFeeShareTooHigh,
+    #[msg("Keeper token account must be owned by the keeper signing the liquidation.")]
+    NotKeeperTokenOwner,
 }
