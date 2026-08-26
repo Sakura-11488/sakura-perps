@@ -27,7 +27,22 @@ import { HermesClient } from "@pythnetwork/hermes-client";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 
-const HERMES_URL = "https://hermes.pyth.network";
+/**
+ * Where price update payloads come from.
+ *
+ * `https://hermes.pyth.network` was free and unauthenticated for years and is
+ * what every Pyth example still shows. As of 2026-08-26 it answers **401
+ * unauthorized** — verified directly with curl, from a host whose egress is
+ * otherwise fine (Solana RPC and GitHub both 200), and the refusal carries
+ * Pyth's own `x-infra` header rather than a network middlebox's. The beta
+ * endpoint refuses identically.
+ *
+ * So the endpoint is configurable and may need a credential. Set HERMES_URL to a
+ * provider you have access to, and HERMES_AUTH to the full header value if it
+ * wants one (for example `Bearer sk-…`). The keeper never logs either.
+ */
+const HERMES_URL = process.env.HERMES_URL ?? "https://hermes.pyth.network";
+const HERMES_AUTH = process.env.HERMES_AUTH;
 
 /** The `PriceUpdateV2` layout, as served by the Pyth receiver program. */
 export interface PriceView {
@@ -124,7 +139,10 @@ export function needsPush(age: Age | null, guards: GuardWindow): boolean {
 }
 
 export class OracleUpdater {
-  private readonly hermes = new HermesClient(HERMES_URL, {});
+  private readonly hermes = new HermesClient(
+    HERMES_URL,
+    HERMES_AUTH ? { headers: { Authorization: HERMES_AUTH } } : {},
+  );
   private readonly receiver: PythSolanaReceiver;
 
   constructor(connection: Connection, wallet: anchor.Wallet) {
@@ -148,7 +166,27 @@ export class OracleUpdater {
     feedIdHex: string,
     onChainPublishTime: number | null,
   ): Promise<TransactionInstruction[] | null> {
-    const updates = await this.hermes.getLatestPriceUpdates([feedIdHex], { encoding: "base64" });
+    let updates;
+    try {
+      updates = await this.hermes.getLatestPriceUpdates([feedIdHex], {
+        encoding: "base64",
+      });
+    } catch (e) {
+      // Diagnose rather than propagate a bare stack. A 401 here is not a bug in
+      // the keeper and no retry will fix it: the endpoint wants a credential.
+      const msg = String(e);
+      if (msg.includes("401") || msg.includes("unauthorized")) {
+        throw new Error(
+          `price feed source ${new URL(HERMES_URL).host} returned 401 unauthorized. ` +
+            "The formerly-free hermes.pyth.network now requires authentication. " +
+            "Set HERMES_URL to an endpoint you have access to, and HERMES_AUTH to " +
+            "its header value if it needs one. Until then the keeper cannot refresh " +
+            "the pinned price account, and can only liquidate during whatever " +
+            "windows the sponsored publisher happens to leave fresh.",
+        );
+      }
+      throw e;
+    }
     const data = updates?.binary?.data;
     if (!data || data.length === 0) return null;
 

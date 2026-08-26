@@ -16,9 +16,41 @@ That matters more than it sounds: on an empty book, a perfectly working keeper
 and a completely broken one both print "nothing to do". `preflight.ts` exists to
 tell those apart, and it is the artifact worth running today.
 
-**One claim in the design is inferred rather than executed:** that a third party
-can refresh the market's pinned Pyth account. `verify-push.ts` is the experiment
-that settles it. Run that before trusting anything else.
+## Blocked: the price feed source wants credentials
+
+`verify-push.ts` was run for real on 2026-08-26 and **did not push**. Pyth's
+Hermes endpoint — free and unauthenticated for years, and what every Pyth example
+still shows — now answers **401 unauthorized**:
+
+    $ curl -s -D - "https://hermes.pyth.network/v2/updates/price/latest?ids[]=ef0d8b6f…"
+    HTTP/1.1 401 Unauthorized
+    x-infra: platform-yellow
+    unauthorized
+
+That is Pyth's own service refusing, not a network block: from the same host,
+Solana RPC and GitHub both return 200, and `hermes-beta.pyth.network` refuses
+identically. So the keeper cannot currently fetch a price update to carry, which
+means it cannot refresh the pinned account, which means it can only liquidate
+during whatever windows the sponsored publisher happens to leave fresh.
+
+**To unblock:** set `HERMES_URL` to an endpoint you have access to and
+`HERMES_AUTH` to its header value (for example `Bearer sk-…`). Neither is ever
+logged. Then re-run `npm run keeper:verify-push` — success is
+`publish_time` and `posted_slot` both advancing, **not** a confirmed signature.
+
+What the run did establish, before the 401:
+
+- The shard-0 PDA for SOL/USD derives to `7UVimffx…` — the account a market
+  would pin — so the write target is right and the design is structurally sound.
+- The feed is badly stale in practice. Two runs about two minutes apart measured
+  age **167 s / 945 slots** then **299 s / 1749 slots**, with no write in
+  between. Against a 120 s / 300-slot guard it was far outside both, the whole
+  time. This is the reason the bot carries its own update rather than waiting.
+
+**Still unproven:** that a third party can actually write to that account. It is
+permissionless by construction and every observed write came from an ordinary
+wallet, but we have not executed one. Treat the atomic oracle strategy as
+plausible-and-unverified until `verify-push` reports the feed advancing.
 
 ## Quick start
 
