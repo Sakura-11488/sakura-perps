@@ -4533,9 +4533,15 @@ fn a_liquidator_cannot_redirect_the_traders_payout_to_itself() {
     fixture.set_price(9_550);
 
     let (keeper, keeper_token_account) = make_keeper(&mut fixture);
+    // A second stranger, purely so the redirect target is a DISTINCT account.
+    // Passing the keeper's own account in both slots aliases one account across
+    // two `mut` positions, which Anchor rejects before any of this program's
+    // constraints run — the test would then pass for a reason unrelated to the
+    // thing it claims to prove.
+    let (_accomplice, accomplice_token_account) = make_keeper(&mut fixture);
 
-    // Name the keeper's own account as the trader's payout destination.
-    let ix = fixture.liquidate_ix_with(&keeper, keeper_token_account, keeper_token_account);
+    // Name an account the trader does not own as the trader's payout destination.
+    let ix = fixture.liquidate_ix_with(&keeper, keeper_token_account, accomplice_token_account);
     let signer = keeper.insecure_clone();
     expect_error(
         fixture.send_meta(ix, &[&signer]).map(|_| ()),
@@ -4556,11 +4562,16 @@ fn a_keeper_cannot_send_its_fee_to_an_account_it_does_not_own() {
     fixture.set_price(9_550);
 
     let (keeper, _keeper_token_account) = make_keeper(&mut fixture);
-    let trader_account = fixture.trader_token_account;
+    // Someone else's collateral account: valid in every respect except that the
+    // signing keeper does not own it. Distinct from the owner's account so the
+    // failure cannot come from account aliasing instead of the constraint.
+    let (_stranger, stranger_token_account) = make_keeper(&mut fixture);
 
-    // The trader's account is a valid collateral account — it just is not the
-    // keeper's.
-    let ix = fixture.liquidate_ix_with(&keeper, trader_account, trader_account);
+    let ix = fixture.liquidate_ix_with(
+        &keeper,
+        stranger_token_account,
+        fixture.trader_token_account,
+    );
     let signer = keeper.insecure_clone();
     expect_error(
         fixture.send_meta(ix, &[&signer]).map(|_| ()),
