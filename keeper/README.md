@@ -115,12 +115,46 @@ the liquidation fee. That fee is charged either way — the keeper's share comes
 *out of* it, never on top — so a liquidated trader pays exactly what they would
 have paid the admin path.
 
-**The keeper earns nothing on the positions that matter most.**
-`apply_liquidation_fee` clamps the fee against what the close fee left of the
-payout, so once a position is far enough underwater the fee, and the keeper's cut
-of it, is zero. Those are precisely the positions generating bad debt. This is a
-property of the protocol's incentive, not of this bot, and it means §9.4's
-bad-debt overhang is only partly addressed by permissionless liquidation.
+**The keeper earns nothing on the positions that matter most — measured, not
+predicted.** `apply_liquidation_fee` clamps the fee against what the close fee
+left of the payout, so once a position is far enough underwater the fee, and the
+keeper's cut of it, is zero.
+
+The first real permissionless liquidation on devnet (2026-08-30) paid exactly
+that:
+
+    gross_payout_quote     0
+    close_fee_quote        0
+    liquidation_fee_quote  0
+    net_payout_quote       0
+    bad_debt_usd           1,690,280
+
+The keeper paid gas and earned nothing, on a position that booked $1.69 of bad
+debt. Treat a zero fee as the expected case for anything deeply underwater, not
+as a rare edge.
+
+### The bot MUST crank `settle_market`, not just watch
+
+This is the reason that liquidation was unprofitable, and it is the single most
+important thing to get right in a deployment.
+
+`accrue` runs only when an instruction touches the market. Funding and borrow do
+not tick with wall-clock time. That devnet position sat open for three days with
+`cum_borrow_index` frozen at its opening value and `cum_funding_index` at zero —
+solvent the whole time, because nothing had settled it. A single `settle_market`
+applied three days of debt at once and took it from solvent, past the liquidation
+band, into bad debt in one step. It never paused in the window where a fee was
+payable.
+
+So a keeper that only polls and reacts will arrive after the fee has clamped to
+zero, every time. A keeper that settles each market on a schedule keeps positions
+crossing the boundary gradually, where liquidating them still pays.
+
+`run.ts` does NOT do this yet. The tick loop reads state and simulates, and the
+bot was designed believing accrual was passive — it is not. Add a per-market
+`settle_market` on a cadence before running this against anything that matters:
+it is permissionless, takes `pool` and `market` only, and is a no-op when
+`now == last_settle_ts`.
 
 `SUBSIDISED=1` liquidates at a loss for operators who care about pool solvency
 more than the fee. Off by default: a bot that quietly pays to work is a bot
@@ -156,6 +190,10 @@ justifies it.
 
 Market bootstrap (`qualify_feed` / `create_market` / `set_risk_params`) is
 admin-gated and belongs in its own script, not in a keeper.
+
+**Not on this list, and not a choice: the `settle_market` crank.** It is missing,
+and the section above explains why that makes the bot unprofitable rather than
+merely incomplete.
 
 ## Telling success from a no-op
 

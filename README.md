@@ -504,15 +504,54 @@ happy path: at a zero share `liquidate_position` settles byte-for-byte like
 the only configuration the deployed exchange is in — and at a non-zero share the
 trader's payout is unchanged while the pool books exactly the keeper's share less.
 
-**Known limits, all pre-mainnet rather than devnet blockers.** A keeper can stamp
-`market.last_good_price` from a price that passed only the looser liquidation
-guards, and `emergency_close_position` settles off that field with no freshness
-gate. Nothing relates `maintenance_margin_bps` to
+### Proven on chain, 2026-08-30 — and it exposed two things
+
+The first permissionless liquidation settled from `DT8fc3LE…3QfY`, a wallet with
+no relationship to the position. Mechanically everything worked: the gate, the
+account constraints, the ledger, the bad-debt record. Economically it did not.
+
+**Accrual is crank-driven, not wall-clock.** `accrue` runs only when an
+instruction touches the market. The position sat open for three days with
+`cum_borrow_index` frozen at its opening 25,112 and `cum_funding_index` at 0 —
+perfectly solvent, because nothing had settled it. One `settle_market` then
+applied the whole backlog at once:
+
+| | before | after |
+|---|---:|---:|
+| `cum_borrow_index` | 25,112 | 61,999,175 |
+| `cum_funding_index` | 0 | 239,930,555 |
+
+This is the load-bearing operational fact about the design and it is documented
+nowhere else: **without something keeping the market settled, a position never
+becomes liquidatable however long it sits.** Time alone does nothing.
+
+**And the fee clamp is the default case, not an edge case.** Because the debt
+landed in one step, the position went from solvent, past the liquidation band,
+into bad debt without ever pausing in the window where a fee was payable. The
+`PositionClosed` event:
+
+    gross_payout_quote     0
+    close_fee_quote        0
+    liquidation_fee_quote  0
+    net_payout_quote       0
+    bad_debt_usd           1,690,280
+
+The keeper paid gas and **earned nothing**. The trader received nothing. The pool
+absorbed the collateral (`quote_deposited` 8,000,000 → 9,294,495) and booked
+$1.69 of bad debt against `cum_bad_debt_usd`.
+
+The two compound, and that is the finding: a missing crank does not merely delay
+liquidation, it destroys the incentive meant to cause it. A keeper settling the
+market on a schedule would have caught this position at the boundary and been
+paid; a keeper that only watches arrives after the fee has clamped to zero.
+**Any keeper for this venue must crank `settle_market`, not just observe.**
+
+**Other known limits, pre-mainnet rather than devnet blockers.** A keeper can
+stamp `market.last_good_price` from a price that passed only the looser
+liquidation guards, and `emergency_close_position` settles off that field with no
+freshness gate. Nothing relates `maintenance_margin_bps` to
 `liquidation_max_confidence_bps + spread_bps`, leaving a band where an owner's own
-`close_position` reverts while a keeper succeeds. And because
-`apply_liquidation_fee` clamps the fee against the payout, the keeper earns
-**nothing** on exactly the deep-underwater positions that generate bad debt — so
-9.4's overhang is only partly addressed without a subsidised bot.
+`close_position` reverts while a keeper succeeds.
 
 ## Roadmap
 
