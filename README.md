@@ -110,7 +110,35 @@ Put rustup's shim first:
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 which cargo   # must be ~/.cargo/bin/cargo, not a standalone install
+which rustc   # must ALSO be ~/.cargo/bin/rustc — see below
 ```
+
+### Checking `cargo` alone is not enough, and the failure is unrecognisable
+
+`cargo` spawns `rustc` **by name, from `PATH`**. Invoking the shim explicitly —
+`~/.cargo/bin/cargo test`, or `RUSTUP_TOOLCHAIN=... cargo test` — therefore still
+hands the compile to whatever `rustc` comes first, and a standalone install
+earlier in `PATH` silently wins. `rust-toolchain.toml` is then not in effect for
+a single compiled crate, while `cargo --version` cheerfully reports the pinned
+version.
+
+What that looks like, none of which mentions a toolchain:
+
+- `E0658: use of unstable library feature 'non_null_from_ref'` from
+  `solana-sbpf`. The pinned 1.89 accepts that feature; an older `rustc` does not.
+- `E0514: found crate ... compiled by an incompatible version of rustc`, once an
+  artifact from the other compiler is in `target/`.
+- Hundreds of `use of undeclared type 'Vec'` / `'Clock'` / `'Pubkey'` errors
+  inside dependencies, cascading from the above.
+
+Diagnose with `rustc --version`, not `cargo --version`. And note that
+`cargo clean` appears to fix the E0514s for exactly one run before they return,
+which makes mixed artifacts look like the root cause when they are a symptom —
+that misreading cost a 3.5 GiB rebuild here before the real cause was found.
+
+CI is unaffected: `dtolnay/rust-toolchain` installs via rustup and leaves no
+competing `rustc` on `PATH`. This reproduces only on developer machines carrying
+a standalone Rust alongside rustup.
 
 ## Quickstart
 
@@ -540,11 +568,50 @@ The keeper paid gas and **earned nothing**. The trader received nothing. The poo
 absorbed the collateral (`quote_deposited` 8,000,000 → 9,294,495) and booked
 $1.69 of bad debt against `cum_bad_debt_usd`.
 
-The two compound, and that is the finding: a missing crank does not merely delay
-liquidation, it destroys the incentive meant to cause it. A keeper settling the
-market on a schedule would have caught this position at the boundary and been
-paid; a keeper that only watches arrives after the fee has clamped to zero.
-**Any keeper for this venue must crank `settle_market`, not just observe.**
+#### Correction, 2026-09-01 — the conclusion drawn above was wrong
+
+This section originally concluded that a missing crank *destroys* the
+liquidation incentive, and that "any keeper for this venue must crank
+`settle_market`, not just observe". **That is false, and the reasoning behind it
+was a misreading of the code.**
+
+`handle_liquidate_position` calls `accrue` at step 2, *before* the solvency gate
+— "accrue before judging solvency, or the gate reads an equity that ignores
+money the position already owes". A stale stored index therefore protects
+nobody: the liquidation accrues and judges inside the same transaction, against
+the current cluster clock. A keeper that only polls sees the position cross the
+boundary on its next tick and collects the ordinary fee.
+
+Proven, not argued, by
+`a_stale_market_index_does_not_stop_a_keeper_being_paid`: six hours pass with
+nothing touching the market, the stored `cum_borrow_index` is asserted unchanged,
+and the liquidation then succeeds with a **non-zero** fee that the keeper is
+actually paid — after which the index has moved, because the liquidation is what
+moved it.
+
+What produced the wrong claim was the doc comment on `accrue`, which read "one
+implementation, five callers" and did not list `liquidate_position`. I added that
+call myself and never updated the list. Both are now fixed.
+
+So why did the devnet liquidation pay zero? Because nothing was watching for
+three days, and the market was then manually settled immediately before being
+liquidated — applying the backlog in one step and carrying the position past the
+fee-payable window before anyone looked. That is what an unattended book looks
+like, not a property that dooms polling keepers.
+
+#### The crank does matter, for the opposite reason
+
+`accrue` clamps its interval: `dt = min(elapsed, max_settle_window_seconds)`,
+while `last_settle_ts` still advances to *now*. Elapsed time beyond one window is
+therefore **never charged** — not deferred, forgiven. `settle_market`'s own test
+asserts exactly this: "only the settle window may be charged, never the whole
+gap".
+
+An uncranked market silently under-charges borrow interest, and that shortfall is
+the LPs'. A market with a one-hour window left alone for a day collects one hour
+of interest and writes off twenty-three. This is a pool-revenue argument, and it
+has nothing to do with keeper fees — which is the reverse of what was written
+here before.
 
 **Other known limits, pre-mainnet rather than devnet blockers.** A keeper can
 stamp `market.last_good_price` from a price that passed only the looser

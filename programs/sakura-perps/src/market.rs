@@ -796,11 +796,17 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
 
 /// Accrue a market's borrow and funding indices up to `clock`.
 ///
-/// One implementation, five callers: the standalone `settle_market` instruction
-/// and the head of `open_position`, `close_position`, `admin_settle_position`
-/// and `emergency_close_position`. The standalone instruction exists so accrual
-/// does not depend on trading activity; the in-line calls exist so no index is
-/// ever *read* stale.
+/// One implementation, six callers: the standalone `settle_market` instruction
+/// and the head of `open_position`, `close_position`, `admin_settle_position`,
+/// `emergency_close_position` and `liquidate_position`. The standalone
+/// instruction exists so accrual does not depend on trading activity; the
+/// in-line calls exist so no index is ever *read* stale.
+///
+/// `liquidate_position` was added and this list was not, which is not a cosmetic
+/// slip. Reading "five callers" is what produced a documented claim that an
+/// uncranked market leaves a position unliquidatable. It does not: the
+/// liquidation accrues before its own solvency gate, so a stale stored index
+/// protects nobody. See `a_stale_market_index_does_not_stop_a_keeper_being_paid`.
 ///
 /// Returns the clamped Δt that was accrued, or `None` when nothing was written —
 /// which is what lets `settle_market` skip its event rather than emit a no-op

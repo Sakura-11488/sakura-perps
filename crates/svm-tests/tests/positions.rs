@@ -4492,6 +4492,82 @@ fn anyone_can_liquidate_an_underwater_position_and_is_paid_for_it() {
     fixture.assert_i1("after a permissionless liquidation");
 }
 
+/// A keeper does not need to crank `settle_market` to be paid.
+///
+/// THIS TEST EXISTS BECAUSE THE REPOSITORY DOCUMENTED THE OPPOSITE. Both READMEs
+/// claimed that an uncranked market leaves a position unliquidatable however long
+/// it sits, and that a polling keeper therefore always arrives after
+/// `apply_liquidation_fee` has clamped its cut to zero. Neither is true.
+///
+/// `handle_liquidate_position` calls `accrue` at step 2, *before* the solvency
+/// gate — "accrue before judging solvency, or the gate reads an equity that
+/// ignores money the position already owes". So a stale stored index protects
+/// nobody: the liquidation accrues and judges in the same transaction, against
+/// the current cluster clock. A keeper that only polls sees the position cross
+/// the boundary on its next tick and collects the ordinary fee.
+///
+/// The devnet liquidation that paid zero had gone three days unattended and was
+/// then manually settled immediately before being liquidated. That is what
+/// nobody watching looks like, not a property that dooms polling keepers.
+#[test]
+fn a_stale_market_index_does_not_stop_a_keeper_being_paid() {
+    // A NON-ZERO BORROW RATE IS LOAD-BEARING HERE. `active_params` sets
+    // `borrow_rate_per_hour: 0`, and `liquidatable_params` inherits it, so under
+    // the default fixture `accrue` legitimately writes nothing and this test
+    // would assert "an uncranked market still pays" while never once exercising
+    // accrual — passing for the wrong reason. The rate is raised so the index
+    // genuinely moves, and the final assertion can prove the liquidation itself
+    // is what moved it.
+    let mut params = liquidatable_params();
+    params.borrow_rate_per_hour = MAX_BORROW_RATE_PER_HOUR;
+
+    let mut fixture = Fixture::new(params);
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 510 * ONE)
+        .expect("open a $10,000 long on $500 of collateral");
+
+    let before = fixture.market_state();
+
+    // Time passes with nothing touching the market: no settle_market, no open,
+    // no close. Exactly the state the devnet market sat in.
+    fixture.advance(6 * 60 * 60, 100);
+    fixture.set_price(9_550);
+
+    // Non-vacuity, and the whole precondition. If stored state moved here, the
+    // test would be exercising a cranked market and proving nothing.
+    assert_eq!(
+        fixture.market_state().cum_borrow_index,
+        before.cum_borrow_index,
+        "six hours must have accrued NOTHING to stored state, or this is not an \
+         uncranked market"
+    );
+
+    let (keeper, keeper_token_account) = make_keeper(&mut fixture);
+    let logs = fixture
+        .liquidate(&keeper, keeper_token_account)
+        .expect("an uncranked market must not block permissionless liquidation");
+    let closed: PositionClosed = event(&logs);
+
+    assert!(
+        closed.liquidation_fee_quote > 0,
+        "the fee must be non-zero — this is the claim under test: a keeper is \
+         paid without anyone having cranked settle_market first"
+    );
+    assert!(
+        fixture.token_balance(keeper_token_account) > 0,
+        "the keeper must actually receive its share of that fee"
+    );
+
+    // And prove the liquidation is what moved the index, so the fee above was
+    // not computed against the stale one.
+    assert!(
+        fixture.market_state().cum_borrow_index > before.cum_borrow_index,
+        "liquidate_position must accrue, or the non-zero fee means nothing"
+    );
+
+    fixture.assert_i1("after liquidating an uncranked market");
+}
+
 /// The safety property of the whole instruction.
 ///
 /// If a solvent position could be closed by a stranger, "permissionless
