@@ -7,11 +7,11 @@
 
 Permissionless oracle-and-pool perpetual futures on Solana.
 
-**Status:** milestone 5 of 10 — markets and positions are live on devnet
-(`devnet-v0.6.0`). Traders can open and close leveraged positions against the
-pool. Funding, borrow fees, liquidation and the keeper are **not built**; there
-is no keeper liquidation at all, so exits currently depend on the position owner
-or the admin. See [What milestone 5 does not settle](#what-milestone-5-does-not-settle).
+**Status:** `devnet-v0.7.0` includes permissionless on-chain liquidation, and
+this repo includes an off-chain keeper. A permissionless liquidation has been
+exercised on devnet. The keeper needs a configured price-feed endpoint to post
+fresh updates; see [keeper status](keeper/README.md). The system remains
+incomplete and unaudited; see the [roadmap](#roadmap).
 
 ---
 
@@ -629,7 +629,8 @@ freshness gate. Nothing relates `maintenance_margin_bps` to
 - [x] **5** — positions: open, close, isolated margin — *deployed `devnet-v0.6.0`*
 - [ ] **6** — funding and borrow fees
 - [ ] **7** — liquidation, insurance fund, bad-debt path
-- [~] **8** — liquidation keeper — *on-chain half shipped (`liquidate_position`); no off-chain bot*
+- [~] **8** — liquidation keeper — *on-chain liquidation and off-chain bot
+  implemented for devnet; price-feed access and operating history still needed*
 - [ ] **9** — TypeScript SDK and app integration
 - [ ] **10** — hardening, fuzzing, reproducible builds, audit prep
 
