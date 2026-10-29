@@ -29,6 +29,7 @@ say so and explain why, rather than letting the report go quiet.
 In scope:
 
 - everything under `programs/`
+- the risk library, keeper and read-only dashboard
 - the deployment and upgrade-authority configuration described in the README
 - the TypeScript client and tests, where a flaw there could mislead a user into
   signing something harmful
@@ -53,6 +54,10 @@ If you are unsure whether something is in scope, ask first — we would rather
 answer a question than receive a report about production.
 
 ## What we already know
+
+The current security work and remaining release gates are tracked in
+[Security hardening](docs/security-hardening.md). Source changes there are not
+evidence of a deployment or an independent audit.
 
 Stated plainly, so nobody spends time rediscovering it:
 

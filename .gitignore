@@ -32,4 +32,6 @@ target-189-clippy/
 keeper/logs/
 keeper/.state.json
 keeper/.state.json.tmp
+keeper/.state.json.lock
+keeper/.state.json.lock.reclaim
 keeper/HALT
