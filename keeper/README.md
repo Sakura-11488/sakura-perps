@@ -5,22 +5,22 @@ An off-chain bot that finds underwater positions and calls `liquidate_position`.
 Devnet only. Unaudited. It signs transactions with a hot key — run it with a
 wallet you are willing to lose.
 
-## Status, plainly
+## Historical devnet observations
 
-**The bot is live and correct, and has nothing to do.** Devnet currently has an
-Exchange and a Pool and *zero* markets, feeds and positions. So there is nothing
-to liquidate, and there will be nothing until somebody runs
+The recorded August 2026 preflight found an Exchange and a Pool and *zero*
+markets, feeds and positions. An empty book does not establish liquidation
+correctness. It has nothing to liquidate until somebody runs
 `qualify_feed → create_market → set_risk_params → open_position`.
 
 That matters more than it sounds: on an empty book, a perfectly working keeper
 and a completely broken one both print "nothing to do". `preflight.ts` exists to
 tell those apart, and it is the artifact worth running today.
 
-## Blocked: the price feed source wants credentials
+## Recorded oracle-access blocker
 
 `verify-push.ts` was run for real on 2026-08-26 and **did not push**. Pyth's
 Hermes endpoint — free and unauthenticated for years, and what every Pyth example
-still shows — now answers **401 unauthorized**:
+still showed — answered **401 unauthorized** in that run:
 
     $ curl -s -D - "https://hermes.pyth.network/v2/updates/price/latest?ids[]=ef0d8b6f…"
     HTTP/1.1 401 Unauthorized
@@ -29,7 +29,7 @@ still shows — now answers **401 unauthorized**:
 
 That is Pyth's own service refusing, not a network block: from the same host,
 Solana RPC and GitHub both return 200, and `hermes-beta.pyth.network` refuses
-identically. So the keeper cannot currently fetch a price update to carry, which
+identically in that run. Without a working source the keeper cannot fetch an update, which
 means it cannot refresh the pinned account, which means it can only liquidate
 during whatever windows the sponsored publisher happens to leave fresh.
 
@@ -77,8 +77,10 @@ each with a deliberate floor-or-ceil direction, and each wrong exactly at the
 boundary where every liquidation lives. The program is already the authority; a
 second implementation is a second thing to keep correct.
 
-`rank.ts`-style scoring does not exist for the same reason. Positions are
-simulated in the order they are found, capped at `MAX_SIMS_PER_TICK`.
+`rank.ts`-style scoring does not exist for the same reason. Positions use a stable
+circular cursor across market/address keys, capped at `MAX_SIMS_PER_TICK`
+candidates (including failures and skips). The cursor is persisted, so a healthy
+prefix or repeated restarts cannot hide later positions.
 
 ## The oracle problem
 
@@ -178,21 +180,59 @@ nobody notices burning a wallet.
 
 | Rail | The failure it prevents |
 |---|---|
-| Only `Custom(6062)` means healthy | One misderived account making every simulation fail, so the bot reports an empty book forever while completely broken |
+| Only `Custom(6062)` from the final pinned liquidation instruction, with runtime failure provenance, means healthy | A push/CPI custom-code collision or misderived account being mistaken for a healthy position |
 | Oracle codes are **market-wide**, never per-position | An oracle outage being recorded as "every position is solvent" |
 | Boot asserts 6062 is `PositionNotLiquidatable` | An IDL/program mismatch silently inverting every verdict. These discriminants have already shifted once in this program's history |
 | `DRY_RUN` defaults on | A first run spending money while account derivations are unproven |
 | Genesis-hash refusal | A mistyped `RPC_URL` arming an unaudited keeper against mainnet |
 | Re-simulate the exact signed bytes | The measured transaction and the sent transaction differing after the compute-budget rewrite |
-| Lock released only on ground truth | Double-sending a liquidation whose first transaction is still confirming |
-| Daily lamport ceiling, per-tick and per-hour caps, failure breaker | A runaway resend loop burning the wallet overnight |
+| Durable pending signature before broadcast | Retrying an ambiguous submission after an RPC failure or process restart |
+| Full-cost reservation, per-tick and persistent hourly caps, failure breaker | A resend loop or uncounted oracle/priority costs burning the wallet |
 | SOL floor | Draining past the point where the keeper can pay for the transaction that reports it is stuck |
-| Priority fee capped at a share of the measured fee | Winning a race at negative EV |
+| Priority fee cap applies to the final CU limit | Compute headroom silently increasing the configured priority-fee cap |
 | Cluster time, never `Date.now()` | VPS clock skew mis-sizing every age decision against a ~50-second window |
 | `KEYPAIR` is a path; every log line is redacted | Key material in an env var visible to `ps`; the RPC api-key leaking into logs |
 | Never push without a liquidation attached | Becoming an unpaid Pyth publisher |
 | Missing owner token account is a hard skip | Spending ~0.002 SOL of unrecoverable rent to fund an account the *trader* owns |
 | `HALT` file stops sending, keeps observing | A circuit breaker also blinding the operator |
+
+## Durable submissions and health
+
+`keeper/.state.json` binds the journal to genesis hash, program and keeper wallet.
+One process owns its lock. Never share this wallet with another spending process
+or copy the journal to an unrelated cluster. Preserve the journal across restarts;
+corrupt state fails closed instead of resetting the spending limit. The old
+`{day, spentLamports}` ledger migrates while retaining its recorded spend.
+
+Before broadcast, the keeper fsyncs the signature, position, blockhash expiry,
+cost reservation and send attempt. RPC exceptions leave that position locked.
+Only a finalized transaction receipt, or finalized block height past expiry plus
+repeated absent status/receipt reads, permits another transaction for that
+position. A missing receipt is charged at the full reservation, never assumed
+free. A successful liquidation log requires both a successful finalized receipt
+and absence of the position account.
+
+Cost estimation includes the exact message's network/priority fee and simulated
+payer debit (including oracle publication and rent), plus a conservative cushion.
+The payer baseline must have the same RPC context slot as the simulation; one
+additional read can recover a matching snapshot, otherwise sending is refused.
+This can reduce throughput on fast-moving or inconsistent RPCs. Finalized fee
+and payer balances reconcile the reservation. An underestimate latches spending
+off for operator investigation. The estimate is not a mathematical guarantee
+against arbitrary changes between simulation and execution; do not share the key
+with another spender, and use a trusted, consistent RPC.
+
+Health is degraded while any position lacks a successful recent simulation
+(`MAX_SCAN_AGE_MS`, default 60 seconds), an oracle or scan failed, a payout
+account is missing, an actionable position cannot be submitted, or a transaction
+remains unresolved. Failures persist until that scope is observed successfully;
+scanning a healthy market does not clear an outage in another market. Scan caps
+must be sized to revisit the entire book within the configured age. A halted
+keeper keeps observing but emits no success heartbeat.
+
+Boolean flags reject anything except `0`, `1`, `true`, or `false`. Limits reject
+negative, fractional, nonfinite and unsafe integers. `npm run test:keeper` runs
+offline regression tests; it does not contact RPC or send transactions.
 
 ## Deliberately not built
 

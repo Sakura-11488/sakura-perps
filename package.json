@@ -9,7 +9,8 @@
     "lint:fix": "prettier --write '{tests,keeper}/**/*.ts'",
     "keeper:preflight": "ts-node keeper/preflight.ts",
     "keeper:verify-push": "ts-node keeper/verify-push.ts",
-    "keeper:run": "ts-node keeper/src/run.ts"
+    "keeper:run": "ts-node keeper/src/run.ts",
+    "test:keeper": "node --require ts-node/register --test keeper/test/*.test.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",

@@ -12,11 +12,9 @@
 //!
 //! Devnet only. Unaudited. Do not use with funds of real value.
 //!
-//! This file currently contains only `initialize_exchange` and the [`Exchange`]
-//! config account. That is deliberate: the first milestone is a pipeline that
-//! demonstrably builds, tests, and deploys, because the repository this replaced
-//! never achieved any of the three. Markets, the liquidity pool, positions,
-//! funding and liquidation land on top of a foundation that is known to work.
+//! This file defines the instruction interface, [`Exchange`] configuration and
+//! admin controls. The market, pool, position and oracle modules implement the
+//! trading and settlement paths.
 //!
 //! # Conventions established here and relied on throughout
 //!
@@ -42,6 +40,9 @@ pub mod market;
 pub mod oracle;
 pub mod pool;
 pub mod position;
+
+#[cfg(test)]
+mod admin_tests;
 
 // Glob re-export, not a narrow import. `#[program]` generates references to
 // `crate::__client_accounts_*` for every Accounts struct, so those macro-made
@@ -266,6 +267,66 @@ pub mod sakura_perps {
             current: flags,
         });
 
+        Ok(())
+    }
+
+    /// Nominates the next admin without granting it any authority yet.
+    ///
+    /// The current admin may replace an outstanding nomination or cancel it.
+    /// A mistyped address cannot take control unless that address signs an
+    /// acceptance. Rotation remains available while every trading action is
+    /// paused. This rotates the exchange admin, not the program upgrade authority
+    /// or fee recipient, and cannot recover an already-lost admin key.
+    pub fn propose_admin(ctx: Context<ProposeAdmin>, new_admin: Pubkey) -> Result<()> {
+        require!(new_admin != Pubkey::default(), PerpsError::InvalidAdmin);
+        require_keys_neq!(
+            new_admin,
+            ctx.accounts.exchange.admin,
+            PerpsError::AdminUnchanged
+        );
+
+        let exchange = &mut ctx.accounts.exchange;
+        let previous_pending_admin = exchange.pending_admin;
+        exchange.pending_admin = new_admin;
+
+        emit!(AdminTransferProposed {
+            exchange: exchange.key(),
+            admin: exchange.admin,
+            previous_pending_admin,
+            pending_admin: new_admin,
+        });
+        Ok(())
+    }
+
+    /// Accepts the current nomination, atomically revoking the outgoing admin.
+    /// Only the nominated signer can accept; clearing the nomination also
+    /// prevents an old acceptance from being reused after the transfer.
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        let exchange = &mut ctx.accounts.exchange;
+        let previous_admin = exchange.admin;
+        exchange.admin = ctx.accounts.pending_admin.key();
+        exchange.pending_admin = Pubkey::default();
+
+        emit!(AdminTransferred {
+            exchange: exchange.key(),
+            previous_admin,
+            admin: exchange.admin,
+        });
+        Ok(())
+    }
+
+    /// Cancels an outstanding nomination. The nominee cannot cancel it or
+    /// accept it after this instruction succeeds.
+    pub fn cancel_admin_transfer(ctx: Context<CancelAdminTransfer>) -> Result<()> {
+        let exchange = &mut ctx.accounts.exchange;
+        let pending_admin = exchange.pending_admin;
+        exchange.pending_admin = Pubkey::default();
+
+        emit!(AdminTransferCancelled {
+            exchange: exchange.key(),
+            admin: exchange.admin,
+            pending_admin,
+        });
         Ok(())
     }
 
@@ -528,6 +589,66 @@ pub struct SetPauseFlags<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ProposeAdmin<'info> {
+    #[account(address = exchange.admin @ PerpsError::NotAdmin)]
+    pub admin: Signer<'info>,
+
+    #[account(mut, seeds = [b"exchange"], bump = exchange.bump)]
+    pub exchange: Box<Account<'info, Exchange>>,
+}
+
+#[derive(Accounts)]
+pub struct AcceptAdmin<'info> {
+    #[account(
+        mut,
+        seeds = [b"exchange"],
+        bump = exchange.bump,
+        constraint = exchange.pending_admin != Pubkey::default() @ PerpsError::NoPendingAdmin,
+        constraint = exchange.pending_admin != exchange.admin @ PerpsError::AdminUnchanged,
+    )]
+    pub exchange: Box<Account<'info, Exchange>>,
+
+    #[account(address = exchange.pending_admin @ PerpsError::NotPendingAdmin)]
+    pub pending_admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CancelAdminTransfer<'info> {
+    #[account(address = exchange.admin @ PerpsError::NotAdmin)]
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"exchange"],
+        bump = exchange.bump,
+        constraint = exchange.pending_admin != Pubkey::default() @ PerpsError::NoPendingAdmin,
+    )]
+    pub exchange: Box<Account<'info, Exchange>>,
+}
+
+#[event]
+pub struct AdminTransferProposed {
+    pub exchange: Pubkey,
+    pub admin: Pubkey,
+    pub previous_pending_admin: Pubkey,
+    pub pending_admin: Pubkey,
+}
+
+#[event]
+pub struct AdminTransferred {
+    pub exchange: Pubkey,
+    pub previous_admin: Pubkey,
+    pub admin: Pubkey,
+}
+
+#[event]
+pub struct AdminTransferCancelled {
+    pub exchange: Pubkey,
+    pub admin: Pubkey,
+    pub pending_admin: Pubkey,
+}
+
+#[derive(Accounts)]
 pub struct SetKeeperFeeShare<'info> {
     #[account(address = exchange.admin @ PerpsError::NotAdmin)]
     pub admin: Signer<'info>,
@@ -660,7 +781,8 @@ pub struct Exchange {
     pub bump: u8,
     /// Current admin. Changed only via the two-step `pending_admin` handshake.
     pub admin: Pubkey,
-    /// Proposed admin, who must call an accept instruction to take over.
+    /// Proposed admin, who must sign `accept_admin` to take over. Zero means
+    /// no pending transfer; the current admin may replace or cancel a proposal.
     pub pending_admin: Pubkey,
     /// Where the protocol's fee share is sent.
     pub fee_recipient: Pubkey,
@@ -905,8 +1027,8 @@ pub enum PerpsError {
     #[msg("Market's position counters and open interest disagree.")]
     OpenInterestAccountingDrift,
 
-    // Appended, and this is the end of the enum — check that before adding more.
-    // Anchor numbers variants by position, so a variant inserted anywhere above
+    // New errors must follow every existing variant. Anchor numbers variants
+    // by position, so a variant inserted anywhere above
     // renumbers every one after it. The first version of these two sat after
     // `PositionNotLiquidatable`, which is NOT last, and silently shifted
     // UtilizationCeilingTooHigh, InvalidPositionSide, MarketSliceExceedsPool and
@@ -916,4 +1038,14 @@ pub enum PerpsError {
     KeeperFeeShareTooHigh,
     #[msg("Keeper token account must be owned by the keeper signing the liquidation.")]
     NotKeeperTokenOwner,
+
+    // Admin rotation errors are appended so all deployed error codes stay stable.
+    #[msg("The proposed admin must not be the zero public key.")]
+    InvalidAdmin,
+    #[msg("The proposed admin must differ from the current admin.")]
+    AdminUnchanged,
+    #[msg("There is no pending admin transfer.")]
+    NoPendingAdmin,
+    #[msg("Only the nominated admin may accept the transfer.")]
+    NotPendingAdmin,
 }

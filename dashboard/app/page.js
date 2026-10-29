@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { currentOracle } from "../lib/observation.js";
 
 const REFRESH_MS = 10000; // full state
 const PRICE_MS = 3000; // lightweight oracle price
@@ -83,6 +84,7 @@ export default function Page() {
   const [err, setErr] = useState(null);
   const [pulse, setPulse] = useState(0);
   const [oracle, setOracle] = useState(null);
+  const [oracleUnavailable, setOracleUnavailable] = useState(false);
   const [history, setHistory] = useState([]);
   const [now, setNow] = useState(() => Date.now() / 1000);
 
@@ -104,13 +106,18 @@ export default function Page() {
   const loadPrice = useCallback(async () => {
     try {
       const r = await fetch("/api/price", { cache: "no-store" });
-      if (!r.ok) return;
+      if (!r.ok) throw new Error("oracle_unavailable");
       const o = await r.json();
-      if (o?.price) {
+      if (typeof o?.price !== "number") throw new Error("oracle_unavailable");
+      setOracleUnavailable(false);
+      if (o) {
         setOracle(o);
         setHistory((h) => [...h.slice(-(HISTORY_MAX - 1)), o.price]);
       }
-    } catch {}
+    } catch {
+      setOracleUnavailable(true);
+      setOracle(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -149,7 +156,10 @@ export default function Page() {
     }
   }, [history]);
 
-  const displayOracle = oracle ?? s?.oracle ?? null;
+  const displayOracle = currentOracle({
+    oracle, snapshot: s?.oracle, unavailable: oracleUnavailable, now,
+  });
+  const degraded = err || s?.status === "degraded" || !displayOracle;
 
   return (
     <div className="wrap">
@@ -159,8 +169,8 @@ export default function Page() {
         </h1>
         <div className="hright">
           <div className="live">
-            <span className={`dot ${err ? "bad" : ""}`} key={pulse} />
-            {err ? `error: ${err}` : s ? `live · ${new Date(s.fetchedAt).toLocaleTimeString()}` : "connecting…"}
+            <span className={`dot ${degraded ? "bad" : ""}`} key={pulse} />
+            {err ? `error: ${err}` : s ? `${degraded ? "degraded" : "connected"} · ${new Date(s.fetchedAt).toLocaleTimeString()}` : "connecting…"}
           </div>
           <ThemeToggle />
         </div>
@@ -179,6 +189,8 @@ export default function Page() {
 
       {!s && !err && <Skeleton />}
 
+      {!displayOracle && s && <div className="note">Oracle unavailable or awaiting a fresh observation. Guard status is unknown.</div>}
+      {s?.status === "degraded" && <div className="note">Some chain reads or clock data are unavailable. Missing state is unknown.</div>}
       {displayOracle && <LivePrice oracle={displayOracle} history={history} now={now} />}
       {s && <HeroStats s={s} oracle={displayOracle} />}
 
@@ -186,8 +198,8 @@ export default function Page() {
         {displayOracle?.modes && <GuardCard oracle={displayOracle} />}
         {s?.exchange && <ExchangeCard ex={s.exchange} />}
         {s?.pools.map((p) => <PoolCard key={p.pubkey} p={p} />)}
-        {s && <RequestsCard requests={s.requests} />}
-        {s && <ActivityCard activity={s.activity} />}
+        {s && <RequestsCard requests={s.requests} error={s.requestsError} />}
+        {s && <ActivityCard activity={s.activity} error={s.activityError} />}
       </div>
 
       {s && (
@@ -234,8 +246,10 @@ function LivePrice({ oracle, history, now }) {
   const prev = history.length >= 2 ? history[history.length - 2] : null;
   const delta = prev != null && price != null ? price - prev : 0;
   const dir = delta > 0.0001 ? "up" : delta < -0.0001 ? "down" : "flat";
-  const age = oracle?.publishTime != null ? Math.max(0, Math.floor(now - oracle.publishTime)) : null;
-  const verdict = oracle?.modes?.trading?.wouldAccept;
+  const age = oracle?.ageSeconds != null
+    ? oracle.ageSeconds + Math.max(0, Math.floor(now - Date.parse(oracle.fetchedAt) / 1000))
+    : null;
+  const verdict = oracle?.modes?.trading?.status;
   const hasHist = history.length >= 2;
   const high = hasHist ? Math.max(...history) : null;
   const low = hasHist ? Math.min(...history) : null;
@@ -255,7 +269,7 @@ function LivePrice({ oracle, history, now }) {
           )}
         </div>
         <div className="bmeta">
-          <span className={`pill ${verdict ? "ok" : "warn"}`}>{verdict ? "tradeable" : "guarded"}</span>
+          <span className="pill warn">{verdict === "failed" ? "reference check failed" : "market checks unknown"}</span>
           <span className="dim">± {oracle?.confidenceBps != null ? oracle.confidenceBps.toFixed(1) : "—"} bps</span>
           <span className="agepulse dim" key={oracle?.publishTime}>{age != null ? `${age}s old` : ""}</span>
         </div>
@@ -276,18 +290,18 @@ function LivePrice({ oracle, history, now }) {
 function HeroStats({ s, oracle }) {
   const o = oracle;
   const p = s.pools?.[0];
-  const verdict = o?.modes?.trading?.wouldAccept;
+  const verdict = o?.modes?.trading?.status;
   const passing = o ? o.modes.trading.guards.filter((g) => g.pass === true).length : 0;
   return (
     <div className="hero hero3">
       <div className="tile">
-        <div className="tk">Guards · trading</div>
+        <div className="tk">Reference guards · trading</div>
         <div className="tv">
-          <span className={`pill ${verdict ? "ok" : "warn"}`}>
-            {verdict ? "would accept" : "would reject"}
+          <span className="pill warn">
+            {verdict === "failed" ? "check failed" : "unknown"}
           </span>
         </div>
-        <div className="tsub">{o ? `${passing} / 6 checks pass` : ""}</div>
+        <div className="tsub">{o ? `${passing} / ${o.modes.trading.guards.length} reference checks pass` : ""}</div>
       </div>
       <div className="tile">
         <div className="tk">Pool TVL</div>
@@ -311,17 +325,17 @@ function GuardCard({ oracle }) {
   const [mode, setMode] = useState("trading");
   const active = oracle.modes[mode];
   const other = oracle.modes[mode === "trading" ? "liquidation" : "trading"];
-  const verdict = active.wouldAccept;
+  const verdict = active.status;
 
   return (
     <div className="card span2">
       <h2>
-        Oracle guard status
+        Oracle reference checks
         <a className="feedlink mono" href={EXPLORER(oracle.feed)} target="_blank" rel="noreferrer">
           feed {oracle.feed.slice(0, 4)}…{oracle.feed.slice(-4)} ↗
         </a>
-        <span className={`verdict pill ${verdict ? "ok" : "warn"}`}>
-          {verdict ? "would accept ✓" : "would reject ✕"}
+        <span className="verdict pill warn">
+          {verdict === "failed" ? "check failed ✕" : "incomplete checks"}
         </span>
       </h2>
 
@@ -337,8 +351,8 @@ function GuardCard({ oracle }) {
           >
             <span className="mono">{name}</span>
             <span className="tgdesc">{desc}</span>
-            <span className={`pill ${oracle.modes[key].wouldAccept ? "ok" : "warn"} tgv`}>
-              {oracle.modes[key].wouldAccept ? "accept" : "reject"}
+            <span className="pill warn tgv">
+              {oracle.modes[key].status === "failed" ? "failed" : "unknown"}
             </span>
           </button>
         ))}
@@ -365,10 +379,10 @@ function GuardCard({ oracle }) {
       </div>
 
       <div className="note" style={{ marginTop: 12 }}>
-        Same live price, {mode === "trading" ? "tight" : "looser"} thresholds.{" "}
-        <span className="hl">Δ</span> marks the three limits that differ — freshness,
-        slot age, confidence. Refusing to liquidate isn&apos;t a safe default, so
-        liquidation tolerates a more degraded price. Fails closed — any single ✕ stops it.
+        Reference defaults only. Actual market guards, sanity bands, feed revocation,
+        pause state, EMA divergence and margin checks are not evaluated here.
+        Unknown checks never mean a trade or liquidation will be accepted.
+        Times use the on-chain clock; <span className="hl">Δ</span> marks differing defaults.
       </div>
     </div>
   );
@@ -433,11 +447,12 @@ function PoolCard({ p }) {
   );
 }
 
-function RequestsCard({ requests }) {
+function RequestsCard({ requests, error }) {
   return (
     <div className="card">
       <h2>Open withdraw requests ({requests.length})</h2>
-      {requests.length === 0 && <div className="note">None.</div>}
+      {error && <div className="note">Withdrawal or escrow data unavailable.</div>}
+      {!error && requests.length === 0 && <div className="note">None.</div>}
       {requests.map((r) => (
         <div key={r.pubkey} className="reqblock">
           <Row k="Owner" v={<Addr value={r.owner} />} />
@@ -448,8 +463,10 @@ function RequestsCard({ requests }) {
           />
           <Row
             k="Escrow"
-            v={r.escrowExists
-              ? <span className="pill warn">holds {Number(r.escrowShares).toLocaleString()} shares</span>
+            v={r.escrowExists === null
+              ? <span className="pill warn">unknown</span>
+              : r.escrowExists
+              ? <span className="pill warn">{r.escrowShares === null ? "balance unknown" : `holds ${Number(r.escrowShares).toLocaleString()} shares`}</span>
               : <span className="pill ok">closed</span>}
           />
         </div>
@@ -458,11 +475,12 @@ function RequestsCard({ requests }) {
   );
 }
 
-function ActivityCard({ activity }) {
+function ActivityCard({ activity, error }) {
   return (
     <div className="card">
       <h2>Recent program activity</h2>
-      {(!activity || activity.length === 0) && <div className="note">No recent transactions.</div>}
+      {error && <div className="note">Activity unavailable.</div>}
+      {!error && (!activity || activity.length === 0) && <div className="note">No recent transactions.</div>}
       {activity?.map((a) => (
         <div className="row" key={a.signature}>
           <span className="k">

@@ -1,234 +1,294 @@
-/**
- * The tick loop. The only file here with control flow.
- *
- *   npx ts-node keeper/src/run.ts
- *
- * Env: RPC_URL, KEYPAIR. Everything else has a default in config.ts.
- * DRY_RUN defaults ON — set DRY_RUN=0 to actually send.
- */
+/** Bounded fair scans, explicit degraded health, and journal-before-broadcast sends. */
 import * as anchor from "@coral-xyz/anchor";
+import path from "path";
 import { loadConfig, loadKeypair, redactRpc } from "./config";
-import { buildCtx, clusterNow, readExchange, ExchangeView } from "./program";
-import { buildCodeTable, CodeTable, isMarketWide } from "./errors";
-import {
-  loadMarkets,
-  loadPositions,
-  groupByMarket,
-  resolveOwnerTokenAccount,
-  MarketRow,
-} from "./discover";
+import { buildCtx, clusterNow, readExchange } from "./program";
+import { buildCodeTable, isMarketWide } from "./errors";
+import { loadMarkets, loadPositions, resolveOwnerTokenAccount, MarketRow } from "./discover";
 import { needsPush, readPriceAge, OracleUpdater } from "./oracle";
-import { buildLiquidateIx, simulate, sendVerified, positionGone } from "./liquidate";
+import { buildLiquidateIx, simulate, prepareVerified, positionGone } from "./liquidate";
 import { decide, profitWindowBps } from "./economics";
 import { Guard } from "./guard";
 import { log, heartbeat } from "./observe";
+import { acquireLease, Journal } from "./journal";
+import { broadcastReserved, reconcilePending } from "./pending";
+import { Health, ScanCoverage, scanBatch, applyOperatingState } from "./scheduler";
+import type { TransactionInstruction } from "@solana/web3.js";
 
 const SUBSIDISED = process.env.SUBSIDISED === "1";
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const keeper = loadKeypair(cfg.keypairPath);
   const ctx = await buildCtx(cfg, keeper);
-  const table: CodeTable = buildCodeTable(ctx.idl);
+  const stateFile = path.resolve(__dirname, "..", ".state.json");
+  const release = acquireLease(stateFile);
+  process.once("exit", release);
+  const identity = `${await ctx.connection.getGenesisHash()}:${ctx.program.programId}:${keeper.publicKey}`;
+  const journal = new Journal(stateFile, identity);
   const guard = new Guard(cfg);
+  const health = new Health();
+  const coverage = new ScanCoverage();
+  const table = buildCodeTable(ctx.idl);
   const updater = new OracleUpdater(ctx.connection, new anchor.Wallet(keeper));
-
   log.info("boot", {
     rpc: redactRpc(cfg.rpcUrl),
     keeper: keeper.publicKey.toBase58(),
     dryRun: cfg.dryRun,
     subsidised: SUBSIDISED,
-    tickMs: cfg.tickMs,
   });
-
-  let exchange: ExchangeView = await readExchange(ctx);
-  let markets: MarketRow[] = await loadMarkets(ctx);
-  let ticks = 0;
 
   for (;;) {
     const started = Date.now();
     guard.startTick();
     try {
-      if (ticks % cfg.marketRefreshTicks === 0) {
-        exchange = await readExchange(ctx);
-        markets = await loadMarkets(ctx);
-        if (markets.length !== exchange.numMarkets) {
-          log.warn("market-count-mismatch", {
-            found: markets.length,
-            expected: exchange.numMarkets,
+      const now = await clusterNow(ctx.connection);
+      // Every tick reconciles old signatures before even considering a new send.
+      // An RPC exception leaves the durable pending record and its budget intact.
+      for (const result of await reconcilePending(ctx.connection, journal, now.unix)) {
+        if (
+          result.kind === "finalized" &&
+          !result.failed &&
+          (await positionGone(ctx, new anchor.web3.PublicKey(result.pending.position)))
+        ) {
+          guard.noteSuccess();
+          log.info("liquidated", {
+            position: result.pending.position,
+            signature: result.pending.signature,
+            cost: result.cost,
+          });
+        } else {
+          guard.noteFailure();
+          guard.coolDown(result.pending.position, Date.now());
+          log.warn("submission-failed", {
+            position: result.pending.position,
+            kind: result.kind,
+            cost: result.cost,
           });
         }
-        for (const m of markets) {
-          const window = profitWindowBps(m);
-          if (window <= 0) {
-            log.warn("market-cannot-pay-a-keeper", {
-              market: m.address.toBase58(),
-              windowBps: window,
-            });
-          }
-        }
       }
-      ticks += 1;
+      health.recover("scan");
+      if (journal.pending.length) health.fail("pending", "awaiting finalized transaction outcome");
+      else health.recover("pending");
 
-      const now = await clusterNow(ctx.connection);
+      // Market completeness/config is part of each successful book observation.
+      const exchange = await readExchange(ctx);
+      const markets = await loadMarkets(ctx);
       const positions = await loadPositions(ctx);
-
-      if (positions.length === 0) {
-        log.info("tick", { positions: 0, markets: markets.length, note: "nothing to do" });
-        await heartbeat(cfg.heartbeatUrl, !guard.halted(), Date.now());
-        await sleep(cfg.tickMs - (Date.now() - started));
-        continue;
-      }
-
-      const byMarket = groupByMarket(positions);
+      if (markets.length !== exchange.numMarkets)
+        throw new Error("market count does not match exchange");
+      health.retain("position:", new Set(positions.map((p) => p.address.toBase58())));
+      health.retain("market:", new Set(positions.map((p) => p.market.toBase58())));
       const marketByKey = new Map(markets.map((m) => [m.address.toBase58(), m]));
+      const pushes = new Map<
+        string,
+        { market: MarketRow; instructions: TransactionInstruction[] } | null
+      >();
+      // Bound candidates, including failures and skips, not merely successful simulations.
+      const candidates = scanBatch(
+        positions,
+        (p) => `${p.market}:${p.address}`,
+        journal.cursor,
+        cfg.maxSimsPerTick,
+      );
       let simulated = 0;
 
-      for (const [key, rows] of byMarket) {
-        const market = marketByKey.get(key);
-        if (!market) {
-          log.warn("unknown-market", { market: key, positions: rows.length });
+      for (const position of candidates) {
+        const pk = position.address.toBase58();
+        const key = position.market.toBase58();
+        const scope = `position:${pk}`;
+        journal.advance(`${key}:${pk}`); // Survives restarts, removals and RPC order changes.
+        if (journal.has(pk)) {
+          health.fail(scope, "transaction pending");
           continue;
         }
-
-        // One oracle read and at most one Hermes fetch per market per tick.
-        const age = await readPriceAge(ctx.connection, market.priceUpdate, now);
-        const push = needsPush(age, {
-          maxAgeSeconds: market.liquidationMaxAgeSeconds,
-          maxAgeSlots: market.liquidationMaxAgeSlots,
-        })
-          ? await updater
-              .buildPushInstructions(market.feedId.toString("hex"), age?.view.publishTime ?? null)
-              .catch((e) => {
-                log.warn("push-build-failed", { market: key, detail: String(e).slice(0, 160) });
-                return null;
-              })
-          : null;
-
-        for (const position of rows) {
-          if (simulated >= cfg.maxSimsPerTick) break;
-          const pk = position.address.toBase58();
-          if (guard.isCoolingDown(pk, Date.now())) continue;
-          if (!guard.claim(pk)) continue;
-
-          try {
-            const ownerTokenAccount = await resolveOwnerTokenAccount(ctx, exchange, position.owner);
-            if (!ownerTokenAccount) {
-              log.info("skip", { position: pk, reason: "owner-has-no-token-account" });
-              continue;
-            }
-
-            const ix = await buildLiquidateIx(ctx, exchange, {
-              position,
-              market,
-              ownerTokenAccount,
-            });
-            const sim = await simulate(ctx, exchange, push ?? [], ix, table);
-            simulated += 1;
-
-            if (sim.verdict.kind === "healthy") continue;
-
-            if (isMarketWide(sim.verdict)) {
-              log.warn("market-blocked", { market: key, verdict: sim.verdict });
-              break; // the whole market is unusable this tick
-            }
-
-            if (sim.verdict.kind === "misconfig") {
-              log.error("misconfig", { position: pk, verdict: sim.verdict });
-              if (guard.noteUnknown())
-                throw new Error("too many misconfigurations; exiting loudly");
-              continue;
-            }
-            if (sim.verdict.kind === "unknown") {
-              log.error("unknown-verdict", { position: pk, detail: sim.verdict.detail });
-              if (guard.noteUnknown()) throw new Error("too many unknown verdicts; exiting loudly");
-              continue;
-            }
-            if (sim.verdict.kind === "owner-account-missing") continue;
-
-            // liquidatable
-            const decision = decide(sim.fee, cfg, SUBSIDISED, sim.unitsConsumed);
-            if (!decision.act) {
-              log.info("skip", {
-                position: pk,
-                reason: decision.reason,
-                feeQuote: sim.fee.keeperFeeQuote.toString(),
-              });
-              continue;
-            }
-
-            log.info("liquidatable", {
-              position: pk,
-              feeQuote: sim.fee.keeperFeeQuote.toString(),
-              units: sim.unitsConsumed,
-              pushed: (push ?? []).length > 0,
-            });
-
-            if (cfg.dryRun) {
-              log.info("dry-run", { position: pk, note: "would send; set DRY_RUN=0 to act" });
-              continue;
-            }
-            if (guard.halted() || guard.breakerTripped()) {
-              log.warn("send-suppressed", { position: pk, halted: guard.halted() });
-              continue;
-            }
-            if (!guard.canSend(Date.now())) continue;
-            if (!(await guard.solventEnough(ctx.connection, keeper.publicKey))) {
-              log.error("below-sol-floor", { keeper: keeper.publicKey.toBase58() });
-              continue;
-            }
-            if (!guard.withinDailyBudget(now.unix, 10_000)) {
-              log.warn("daily-budget-exhausted", {});
-              continue;
-            }
-
-            const out = await sendVerified(
-              ctx,
-              push ?? [],
-              ix,
-              sim.unitsConsumed,
-              decision.priorityFeeMicroLamports,
-              keeper,
-            );
-            guard.noteSend(Date.now());
-            guard.recordSpend(now.unix, 10_000);
-
-            if (!out.sent) {
-              guard.noteFailure();
-              guard.coolDown(pk, Date.now());
-              log.warn("send-refused", { position: pk, reason: out.reason });
-              continue;
-            }
-
-            // A confirmed signature is not success. Losing the race also confirms.
-            const gone = await positionGone(ctx, position.address);
-            if (gone) {
-              guard.noteSuccess();
-              log.info("liquidated", { position: pk, signature: out.signature });
-            } else {
-              guard.noteFailure();
-              guard.coolDown(pk, Date.now());
-              log.warn("sent-but-position-remains", { position: pk, signature: out.signature });
-            }
-          } finally {
-            guard.release(pk);
+        if (guard.isCoolingDown(pk, Date.now())) continue;
+        try {
+          const market = marketByKey.get(key);
+          if (!market) {
+            health.fail(scope, "unknown market");
+            continue;
           }
+          if (!pushes.has(key)) {
+            try {
+              const age = await readPriceAge(ctx.connection, market.priceUpdate, now);
+              const needsUpdate = needsPush(age, {
+                maxAgeSeconds: market.liquidationMaxAgeSeconds,
+                maxAgeSlots: market.liquidationMaxAgeSlots,
+              });
+              const instructions = needsUpdate
+                ? await updater.buildPushInstructions(
+                    market.feedId.toString("hex"),
+                    age?.view.publishTime ?? null,
+                  )
+                : null;
+              // A newer update is required only outside the actual guards; the
+              // earlier needsPush margin allows a healthy existing feed to work.
+              if (
+                (!age ||
+                  age.seconds > market.liquidationMaxAgeSeconds ||
+                  age.slots > market.liquidationMaxAgeSlots) &&
+                !instructions?.length
+              )
+                throw new Error("stale oracle has no usable update");
+              pushes.set(key, { market, instructions: instructions ?? [] });
+            } catch (error) {
+              pushes.set(key, null);
+              health.fail(`market:${key}`, "oracle refresh unavailable");
+              log.warn("market-oracle-unavailable", {
+                market: key,
+                detail: String(error).slice(0, 160),
+              });
+            }
+          }
+          const push = pushes.get(key);
+          if (!push) continue;
+          const ownerTokenAccount = await resolveOwnerTokenAccount(ctx, exchange, position.owner);
+          if (!ownerTokenAccount) {
+            health.fail(scope, "owner has no payout token account");
+            continue;
+          }
+          const ix = await buildLiquidateIx(ctx, exchange, { position, market, ownerTokenAccount });
+          const sim = await simulate(ctx, exchange, push.instructions, ix, table);
+          simulated += 1;
+          if (isMarketWide(sim.verdict)) {
+            health.fail(`market:${key}`, sim.verdict.kind);
+            pushes.set(key, null);
+            log.warn("market-blocked", { market: key, verdict: sim.verdict });
+            continue;
+          }
+          if (sim.verdict.kind === "healthy" || sim.verdict.kind === "liquidatable") {
+            coverage.record(pk, Date.now());
+            health.recover(`market:${key}`);
+            health.recover(scope);
+          }
+          if (sim.verdict.kind === "healthy") continue;
+          if (sim.verdict.kind !== "liquidatable") {
+            health.fail(scope, sim.verdict.kind);
+            log.error("candidate-unverified", { position: pk, verdict: sim.verdict });
+            if (
+              (sim.verdict.kind === "unknown" || sim.verdict.kind === "misconfig") &&
+              guard.noteUnknown()
+            )
+              throw new Error("exiting loudly: repeated unrecognized simulations");
+            continue;
+          }
+          const decision = decide(sim.fee, cfg, SUBSIDISED, sim.unitsConsumed);
+          if (!decision.act) {
+            health.fail(scope, decision.reason);
+            continue;
+          }
+          if (profitWindowBps(market) <= 0) log.warn("market-cannot-pay-a-keeper", { market: key });
+          if (cfg.dryRun) {
+            health.fail(scope, "dry run: liquidation not submitted");
+            continue;
+          }
+          if (guard.halted() || guard.breakerTripped() || journal.overrun) {
+            health.fail(scope, "sending halted");
+            continue;
+          }
+          if (
+            !guard.canSend(Date.now()) ||
+            journal.recentAttempts(now.unix) >= cfg.maxSendsPerHour
+          ) {
+            health.fail(scope, "send rate limited");
+            continue;
+          }
+          const result = await prepareVerified(
+            ctx,
+            push.instructions,
+            ix,
+            sim.unitsConsumed,
+            decision.priorityFeeMicroLamports,
+            keeper,
+          );
+          if ("reason" in result) {
+            health.fail(scope, result.reason);
+            guard.noteFailure();
+            continue;
+          }
+          const prepared = result.prepared;
+          if (prepared.reservedLamports > journal.available(now.unix, cfg.maxDailyLamports)) {
+            health.fail(scope, "daily budget exhausted");
+            continue;
+          }
+          const balance = await ctx.connection.getBalance(keeper.publicKey, "confirmed");
+          const outstanding = journal.pending.reduce((sum, p) => sum + p.reservedLamports, 0);
+          if (balance - outstanding - prepared.reservedLamports < cfg.minSolLamports) {
+            health.fail(scope, "below SOL floor after reservation");
+            continue;
+          }
+          health.fail(scope, "transaction pending");
+          await broadcastReserved(
+            journal,
+            {
+              position: pk,
+              signature: prepared.signature,
+              blockhash: prepared.blockhash,
+              lastValidBlockHeight: prepared.lastValidBlockHeight,
+              reservedLamports: prepared.reservedLamports,
+              submittedAt: now.unix,
+            },
+            cfg.maxDailyLamports,
+            cfg.maxSendsPerHour,
+            async () => {
+              guard.noteSend(Date.now());
+              return ctx.connection.sendRawTransaction(prepared.bytes, {
+                skipPreflight: true,
+                maxRetries: 3,
+              });
+            },
+          );
+          log.info("submitted", {
+            position: pk,
+            signature: prepared.signature,
+            reservedLamports: prepared.reservedLamports,
+          });
+        } catch (error) {
+          health.fail(
+            scope,
+            journal.has(pk)
+              ? "ambiguous submission; awaiting reconciliation"
+              : "candidate processing failed",
+          );
+          log.error("candidate-failed", { position: pk, detail: String(error).slice(0, 200) });
+          if (String(error).includes("exiting loudly")) throw error;
         }
       }
-
-      log.info("tick", { positions: positions.length, simulated, markets: markets.length });
-      await heartbeat(cfg.heartbeatUrl, !guard.halted() && !guard.breakerTripped(), Date.now());
-    } catch (e) {
-      log.error("tick-failed", { detail: String(e).slice(0, 300) });
-      if (String(e).includes("exiting loudly")) process.exit(1);
+      const unobserved = coverage.missing(
+        new Set(positions.map((p) => p.address.toBase58())),
+        Date.now(),
+        cfg.maxScanAgeMs,
+      );
+      if (unobserved)
+        health.fail("coverage", `${unobserved} positions have no recent verified simulation`);
+      else health.recover("coverage");
+      applyOperatingState(health, {
+        halted: guard.halted(),
+        breakerTripped: guard.breakerTripped(),
+        budgetOverrun: journal.overrun,
+        budgetExhausted: journal.available(now.unix, cfg.maxDailyLamports) === 0,
+      });
+      const healthy = health.healthy;
+      log.info("tick", {
+        positions: positions.length,
+        simulated,
+        pending: journal.pending.length,
+        healthy,
+        degraded: health.reasons,
+      });
+      await heartbeat(cfg.heartbeatUrl, healthy, Date.now());
+    } catch (error) {
+      health.fail("scan", "book or pending-transaction reconciliation failed");
+      log.error("tick-failed", { detail: String(error).slice(0, 300) });
+      if (String(error).includes("exiting loudly")) throw error;
     }
     await sleep(cfg.tickMs - (Date.now() - started));
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
-
-main().catch((e) => {
-  log.error("fatal", { detail: String(e).slice(0, 400) });
+main().catch((error) => {
+  log.error("fatal", { detail: String(error).slice(0, 400) });
   process.exit(1);
 });
