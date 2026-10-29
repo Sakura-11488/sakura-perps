@@ -14,6 +14,52 @@ export type SakuraPerps = {
   },
   "instructions": [
     {
+      "name": "acceptAdmin",
+      "docs": [
+        "Accepts the current nomination, atomically revoking the outgoing admin.",
+        "Only the nominated signer can accept; clearing the nomination also",
+        "prevents an old acceptance from being reused after the transfer."
+      ],
+      "discriminator": [
+        112,
+        42,
+        45,
+        90,
+        116,
+        181,
+        13,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pendingAdmin",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "adminSettlePosition",
       "docs": [
         "Liquidates a position that no longer meets its maintenance margin.",
@@ -203,6 +249,51 @@ export type SakuraPerps = {
         },
         {
           "name": "tokenProgram"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancelAdminTransfer",
+      "docs": [
+        "Cancels an outstanding nomination. The nominee cannot cancel it or",
+        "accept it after this instruction succeeds."
+      ],
+      "discriminator": [
+        38,
+        131,
+        157,
+        31,
+        240,
+        137,
+        44,
+        215
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -1980,6 +2071,61 @@ export type SakuraPerps = {
       ]
     },
     {
+      "name": "proposeAdmin",
+      "docs": [
+        "Nominates the next admin without granting it any authority yet.",
+        "",
+        "The current admin may replace an outstanding nomination or cancel it.",
+        "A mistyped address cannot take control unless that address signs an",
+        "acceptance. Rotation remains available while every trading action is",
+        "paused. This rotates the exchange admin, not the program upgrade authority",
+        "or fee recipient, and cannot recover an already-lost admin key."
+      ],
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "newAdmin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "qualifyFeed",
       "docs": [
         "Declares a Pyth feed safe to price markets against.",
@@ -2793,6 +2939,45 @@ export type SakuraPerps = {
   ],
   "events": [
     {
+      "name": "adminTransferCancelled",
+      "discriminator": [
+        93,
+        23,
+        69,
+        55,
+        216,
+        128,
+        106,
+        56
+      ]
+    },
+    {
+      "name": "adminTransferProposed",
+      "discriminator": [
+        203,
+        168,
+        175,
+        51,
+        239,
+        104,
+        20,
+        85
+      ]
+    },
+    {
+      "name": "adminTransferred",
+      "discriminator": [
+        255,
+        147,
+        182,
+        5,
+        199,
+        217,
+        38,
+        179
+      ]
+    },
+    {
       "name": "exchangeInitialized",
       "discriminator": [
         200,
@@ -3385,9 +3570,93 @@ export type SakuraPerps = {
       "code": 6068,
       "name": "notKeeperTokenOwner",
       "msg": "Keeper token account must be owned by the keeper signing the liquidation."
+    },
+    {
+      "code": 6069,
+      "name": "invalidAdmin",
+      "msg": "The proposed admin must not be the zero public key."
+    },
+    {
+      "code": 6070,
+      "name": "adminUnchanged",
+      "msg": "The proposed admin must differ from the current admin."
+    },
+    {
+      "code": 6071,
+      "name": "noPendingAdmin",
+      "msg": "There is no pending admin transfer."
+    },
+    {
+      "code": 6072,
+      "name": "notPendingAdmin",
+      "msg": "Only the nominated admin may accept the transfer."
     }
   ],
   "types": [
+    {
+      "name": "adminTransferCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pendingAdmin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "adminTransferProposed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "previousPendingAdmin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pendingAdmin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "adminTransferred",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "previousAdmin",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
     {
       "name": "closePositionParams",
       "docs": [
@@ -3459,7 +3728,8 @@ export type SakuraPerps = {
           {
             "name": "pendingAdmin",
             "docs": [
-              "Proposed admin, who must call an accept instruction to take over."
+              "Proposed admin, who must sign `accept_admin` to take over. Zero means",
+              "no pending transfer; the current admin may replace or cancel a proposal."
             ],
             "type": "pubkey"
           },

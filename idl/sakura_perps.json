@@ -8,6 +8,52 @@
   },
   "instructions": [
     {
+      "name": "accept_admin",
+      "docs": [
+        "Accepts the current nomination, atomically revoking the outgoing admin.",
+        "Only the nominated signer can accept; clearing the nomination also",
+        "prevents an old acceptance from being reused after the transfer."
+      ],
+      "discriminator": [
+        112,
+        42,
+        45,
+        90,
+        116,
+        181,
+        13,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_admin",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "admin_settle_position",
       "docs": [
         "Liquidates a position that no longer meets its maintenance margin.",
@@ -197,6 +243,51 @@
         },
         {
           "name": "token_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_admin_transfer",
+      "docs": [
+        "Cancels an outstanding nomination. The nominee cannot cancel it or",
+        "accept it after this instruction succeeds."
+      ],
+      "discriminator": [
+        38,
+        131,
+        157,
+        31,
+        240,
+        137,
+        44,
+        215
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -1974,6 +2065,61 @@
       ]
     },
     {
+      "name": "propose_admin",
+      "docs": [
+        "Nominates the next admin without granting it any authority yet.",
+        "",
+        "The current admin may replace an outstanding nomination or cancel it.",
+        "A mistyped address cannot take control unless that address signs an",
+        "acceptance. Rotation remains available while every trading action is",
+        "paused. This rotates the exchange admin, not the program upgrade authority",
+        "or fee recipient, and cannot recover an already-lost admin key."
+      ],
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "qualify_feed",
       "docs": [
         "Declares a Pyth feed safe to price markets against.",
@@ -2787,6 +2933,45 @@
   ],
   "events": [
     {
+      "name": "AdminTransferCancelled",
+      "discriminator": [
+        93,
+        23,
+        69,
+        55,
+        216,
+        128,
+        106,
+        56
+      ]
+    },
+    {
+      "name": "AdminTransferProposed",
+      "discriminator": [
+        203,
+        168,
+        175,
+        51,
+        239,
+        104,
+        20,
+        85
+      ]
+    },
+    {
+      "name": "AdminTransferred",
+      "discriminator": [
+        255,
+        147,
+        182,
+        5,
+        199,
+        217,
+        38,
+        179
+      ]
+    },
+    {
       "name": "ExchangeInitialized",
       "discriminator": [
         200,
@@ -3379,9 +3564,93 @@
       "code": 6068,
       "name": "NotKeeperTokenOwner",
       "msg": "Keeper token account must be owned by the keeper signing the liquidation."
+    },
+    {
+      "code": 6069,
+      "name": "InvalidAdmin",
+      "msg": "The proposed admin must not be the zero public key."
+    },
+    {
+      "code": 6070,
+      "name": "AdminUnchanged",
+      "msg": "The proposed admin must differ from the current admin."
+    },
+    {
+      "code": 6071,
+      "name": "NoPendingAdmin",
+      "msg": "There is no pending admin transfer."
+    },
+    {
+      "code": 6072,
+      "name": "NotPendingAdmin",
+      "msg": "Only the nominated admin may accept the transfer."
     }
   ],
   "types": [
+    {
+      "name": "AdminTransferCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminTransferProposed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_pending_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminTransferred",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
     {
       "name": "ClosePositionParams",
       "docs": [
@@ -3453,7 +3722,8 @@
           {
             "name": "pending_admin",
             "docs": [
-              "Proposed admin, who must call an accept instruction to take over."
+              "Proposed admin, who must sign `accept_admin` to take over. Zero means",
+              "no pending transfer; the current admin may replace or cancel a proposal."
             ],
             "type": "pubkey"
           },

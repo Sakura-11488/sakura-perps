@@ -5,44 +5,47 @@ An off-chain bot that finds underwater positions and calls `liquidate_position`.
 Devnet only. Unaudited. It signs transactions with a hot key — run it with a
 wallet you are willing to lose.
 
-## Historical devnet observations
+## Status, plainly
 
-The recorded August 2026 preflight found an Exchange and a Pool and *zero*
-markets, feeds and positions. An empty book does not establish liquidation
-correctness. It has nothing to liquidate until somebody runs
-`qualify_feed → create_market → set_risk_params → open_position`.
+**Status reviewed 2026-10-29:** the off-chain keeper is implemented for devnet,
+but sustained operation and its pinned-feed refresh path have not been
+demonstrated in the recorded work. A permissionless on-chain liquidation was
+exercised on 2026-08-30; that is not proof that this bot is running continuously.
 
-That matters more than it sounds: on an empty book, a perfectly working keeper
-and a completely broken one both print "nothing to do". `preflight.ts` exists to
-tell those apart, and it is the artifact worth running today.
+An earlier snapshot reported zero markets, feeds and positions. That predates the
+recorded liquidation and must not be treated as the current book.
+Inspect current accounts with `preflight.ts` before operating the keeper. On an
+empty book, both a working and a broken keeper can print "nothing to do";
+preflight supplies additional checks, not proof of successful liquidation.
 
 ## Recorded oracle-access blocker
 
-`verify-push.ts` was run for real on 2026-08-26 and **did not push**. Pyth's
-Hermes endpoint — free and unauthenticated for years, and what every Pyth example
-still showed — answered **401 unauthorized** in that run:
+`verify-push.ts` was run on 2026-08-26 and **did not push** because the
+configured public Hermes endpoint returned **401 unauthorized**. A read-only
+request to the same endpoint returned 401 again on 2026-10-29.
+The response recorded on 2026-08-26 was:
 
     $ curl -s -D - "https://hermes.pyth.network/v2/updates/price/latest?ids[]=ef0d8b6f…"
     HTTP/1.1 401 Unauthorized
     x-infra: platform-yellow
     unauthorized
 
-That is Pyth's own service refusing, not a network block: from the same host,
-Solana RPC and GitHub both return 200, and `hermes-beta.pyth.network` refuses
-identically in that run. Without a working source the keeper cannot fetch an update, which
-means it cannot refresh the pinned account, which means it can only liquidate
-during whatever windows the sponsored publisher happens to leave fresh.
+The default endpoint remains unusable from the checked environment without
+working access. This does not establish the status of every Hermes deployment.
+Without a usable update source, the keeper cannot carry its own refresh and
+depends on sponsored-publisher freshness; continuous liquidation coverage has
+not been demonstrated.
 
 **To unblock:** set `HERMES_URL` to an endpoint you have access to and
-`HERMES_AUTH` to its header value (for example `Bearer sk-…`). Neither is ever
-logged. Then re-run `npm run keeper:verify-push` — success is
+`HERMES_AUTH` to its header value (for example `Bearer sk-…`). Keep these values
+out of public logs and reports. Then re-run `npm run keeper:verify-push` — success is
 `publish_time` and `posted_slot` both advancing, **not** a confirmed signature.
 
-What the run did establish, before the 401:
+What the 2026-08-26 run established, before the 401:
 
 - The shard-0 PDA for SOL/USD derives to `7UVimffx…` — the account a market
   would pin — so the write target is right and the design is structurally sound.
-- The feed is badly stale in practice. Two runs about two minutes apart measured
+- The feed was stale in those observations. Two runs about two minutes apart measured
   age **167 s / 945 slots** then **299 s / 1749 slots**, with no write in
   between. Against a 120 s / 300-slot guard it was far outside both, the whole
   time. This is the reason the bot carries its own update rather than waiting.
@@ -97,8 +100,8 @@ PDA. Verified: `getPriceFeedAccountAddress(0, SOL/USD)` derives
 `7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE`, the feed this repo's README
 names, owned by the Pyth receiver and writable by anyone.
 
-This is not optional. Devnet's sponsored publisher is intermittent — measured
-going **314 seconds** between writes, with slot age reaching ~1500. Against a
+The recorded August devnet observations showed an intermittent sponsored
+publisher: **314 seconds** between writes, with slot age reaching ~1500. Against a
 300-slot liquidation guard at devnet's measured **~6 slots/second** (≈50 seconds,
 not the ~120 seconds a 400 ms slot assumption implies), a keeper that waits for
 someone else to push can only act during a small minority of each blackout, in
@@ -112,8 +115,10 @@ unpaid Pyth publisher.
 
 ## The economics, including the bad part
 
-The keeper is paid `exchange.keeper_fee_share_bps` (currently **2000** = 20%) of
-the liquidation fee. That fee is charged either way — the keeper's share comes
+The keeper is paid `exchange.keeper_fee_share_bps` of the liquidation fee.
+The last recorded devnet setting is **2000** = 20%; read the exchange account
+before relying on the current rate. That fee is charged either way — the keeper's
+share comes
 *out of* it, never on top — so a liquidated trader pays exactly what they would
 have paid the admin path.
 
@@ -145,8 +150,8 @@ as unprofitable when it is not.
 
 `handle_liquidate_position` calls `accrue` at step 2, *before* the solvency gate.
 So a stale stored index protects nobody. The simulation this bot runs accrues to
-the current cluster clock, sees the position cross the boundary on the very next
-tick, and the liquidation that follows charges the ordinary fee.
+the current cluster clock and can detect the crossing on a later tick. A successful
+liquidation can pay a fee while sufficient payout remains.
 
 `a_stale_market_index_does_not_stop_a_keeper_being_paid` in the SVM suite proves
 it: six hours with nothing touching the market, stored index asserted unchanged,
@@ -158,7 +163,8 @@ The error came from `accrue`'s doc comment, which listed five callers and omitte
 The devnet liquidation paid zero because nobody was watching for three days and
 the market was manually settled immediately before it was liquidated — the
 backlog landed in one step and carried the position past the fee-payable window.
-A keeper running on a tick would have caught it at the boundary.
+A polling keeper could have acted earlier if oracle access and transaction
+submission succeeded.
 
 ### The crank is still worth running, for the pool rather than the keeper
 
@@ -191,7 +197,7 @@ nobody notices burning a wallet.
 | SOL floor | Draining past the point where the keeper can pay for the transaction that reports it is stuck |
 | Priority fee cap applies to the final CU limit | Compute headroom silently increasing the configured priority-fee cap |
 | Cluster time, never `Date.now()` | VPS clock skew mis-sizing every age decision against a ~50-second window |
-| `KEYPAIR` is a path; every log line is redacted | Key material in an env var visible to `ps`; the RPC api-key leaking into logs |
+| `KEYPAIR` is a path; the boot log redacts the RPC URL | Inline key material and boot-time RPC credential exposure; upstream error logs still need review before sharing |
 | Never push without a liquidation attached | Becoming an unpaid Pyth publisher |
 | Missing owner token account is a hard skip | Spending ~0.002 SOL of unrecoverable rent to fund an account the *trader* owns |
 | `HALT` file stops sending, keeps observing | A circuit breaker also blinding the operator |
@@ -236,14 +242,16 @@ offline regression tests; it does not contact RPC or send transactions.
 
 ## Deliberately not built
 
-Batching, websockets, owner-ATA creation, a database, a dashboard, Jito bundles,
-multi-market sharding, a mainnet profile. All of it is surface area unearned by a
-book of zero positions. `buildLiquidateIx` returns a bare instruction and
+Batching, websockets, owner-ATA creation, a database, a dashboard for keeper operations, Jito bundles,
+multi-market sharding, a mainnet profile. These remain outside the current devnet
+scope. `buildLiquidateIx` returns a bare instruction and
 `loadPositions` is one function, so each is a contained change when a real book
 justifies it.
 
-Market bootstrap (`qualify_feed` / `create_market` / `set_risk_params`) is
-admin-gated and belongs in its own script, not in a keeper.
+Market bootstrap belongs in its own script, not in a keeper. Feed qualification
+and risk-parameter changes are admin-gated; `create_market` is permissionless for
+a qualified feed, and the new market stays quarantined until its risk parameters
+are set.
 
 The `settle_market` crank is also not built, and that IS a choice — though this
 file previously said the opposite, calling it "not a choice" and a gap that made
