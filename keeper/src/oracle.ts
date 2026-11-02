@@ -23,7 +23,7 @@
  * Pyth publisher.
  */
 import { PythSolanaReceiver } from "@pythnetwork/pyth-solana-receiver";
-import { HermesClient } from "@pythnetwork/hermes-client";
+import { fetchHermesUpdate } from "./hermes";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 
@@ -139,10 +139,6 @@ export function needsPush(age: Age | null, guards: GuardWindow): boolean {
 }
 
 export class OracleUpdater {
-  private readonly hermes = new HermesClient(
-    HERMES_URL,
-    HERMES_AUTH ? { headers: { Authorization: HERMES_AUTH } } : {},
-  );
   private readonly receiver: PythSolanaReceiver;
 
   constructor(connection: Connection, wallet: anchor.Wallet) {
@@ -165,38 +161,19 @@ export class OracleUpdater {
   async buildPushInstructions(
     feedIdHex: string,
     onChainPublishTime: number | null,
+    nowSeconds: () => number,
   ): Promise<TransactionInstruction[] | null> {
-    let updates;
-    try {
-      updates = await this.hermes.getLatestPriceUpdates([feedIdHex], {
-        encoding: "base64",
-      });
-    } catch (e) {
-      // Diagnose rather than propagate a bare stack. A 401 here is not a bug in
-      // the keeper and no retry will fix it: the endpoint wants a credential.
-      const msg = String(e);
-      if (msg.includes("401") || msg.includes("unauthorized")) {
-        throw new Error(
-          `price feed source ${new URL(HERMES_URL).host} returned 401 unauthorized. ` +
-            "The formerly-free hermes.pyth.network now requires authentication. " +
-            "Set HERMES_URL to an endpoint you have access to, and HERMES_AUTH to " +
-            "its header value if it needs one. Until then the keeper cannot refresh " +
-            "the pinned price account, and can only liquidate during whatever " +
-            "windows the sponsored publisher happens to leave fresh.",
-        );
-      }
-      throw e;
-    }
-    const data = updates?.binary?.data;
-    if (!data || data.length === 0) return null;
+    const updates = await fetchHermesUpdate(feedIdHex, {
+      endpoint: HERMES_URL,
+      authorization: HERMES_AUTH,
+      nowSeconds,
+    });
+    if (onChainPublishTime !== null && updates.publishTime <= onChainPublishTime) return null;
 
-    const parsed = updates.parsed?.[0];
-    if (parsed && onChainPublishTime !== null) {
-      const fresh = Number(parsed.price.publish_time);
-      if (!(fresh > onChainPublishTime)) return null;
-    }
-
-    const { postInstructions } = await this.receiver.buildUpdatePriceFeedInstructions(data, 0);
+    const { postInstructions } = await this.receiver.buildUpdatePriceFeedInstructions(
+      updates.data,
+      0,
+    );
 
     // Ephemeral signers would make this un-composable with our own signing, and
     // the atomic UpdatePriceFeed path is not supposed to need any. If one shows

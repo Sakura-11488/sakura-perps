@@ -22,11 +22,17 @@ export const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 /** Anchor error code for `PositionNotLiquidatable`, asserted against the IDL at boot. */
 export const POSITION_NOT_LIQUIDATABLE = 6062;
 
-const num = (name: string, dflt: number): number => {
+const num = (
+  name: string,
+  dflt: number,
+  minimum = 0,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number => {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return dflt;
   const v = Number(raw);
-  if (!Number.isFinite(v)) throw new Error(`${name} must be a number, got ${raw}`);
+  if (!Number.isSafeInteger(v) || v < minimum || v > maximum)
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
   return v;
 };
 
@@ -34,7 +40,9 @@ const num = (name: string, dflt: number): number => {
 const bool = (name: string, dflt: boolean): boolean => {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return dflt;
-  return raw === "1" || raw.toLowerCase() === "true";
+  if (raw === "1" || raw.toLowerCase() === "true") return true;
+  if (raw === "0" || raw.toLowerCase() === "false") return false;
+  throw new Error(`${name} must be 0, 1, true or false`);
 };
 
 export interface Config {
@@ -43,6 +51,7 @@ export interface Config {
   dryRun: boolean;
   tickMs: number;
   maxSimsPerTick: number;
+  maxScanAgeMs: number;
   minKeeperFeeQuote: number;
   priorityFeeShareBps: number;
   priorityFeeCapLamports: number;
@@ -76,21 +85,22 @@ export function loadConfig(): Config {
     // Defaults ON. A first run must not be able to spend money while the
     // account derivations are still unproven.
     dryRun: bool("DRY_RUN", true),
-    tickMs: num("TICK_MS", 2000),
-    maxSimsPerTick: num("MAX_SIMS_PER_TICK", 40),
+    tickMs: num("TICK_MS", 2000, 1, 2_147_483_647),
+    maxSimsPerTick: num("MAX_SIMS_PER_TICK", 40, 1),
+    maxScanAgeMs: num("MAX_SCAN_AGE_MS", 60_000, 1),
     /** $0.01 at 6 decimals. Below this a liquidation cannot pay for its own signature. */
     minKeeperFeeQuote: num("MIN_KEEPER_FEE_QUOTE", 10_000),
-    priorityFeeShareBps: num("PRIORITY_FEE_SHARE_BPS", 2500),
+    priorityFeeShareBps: num("PRIORITY_FEE_SHARE_BPS", 2500, 0, 10_000),
     priorityFeeCapLamports: num("PRIORITY_FEE_CAP_LAMPORTS", 200_000),
     maxSendsPerTick: num("MAX_SENDS_PER_TICK", 3),
     maxSendsPerHour: num("MAX_SENDS_PER_HOUR", 60),
     maxDailyLamports: num("MAX_DAILY_LAMPORTS", 50_000_000),
     minSolLamports: num("MIN_SOL_LAMPORTS", 50_000_000),
     exitOnUnknown: bool("EXIT_ON_UNKNOWN", true),
-    unknownTolerance: num("UNKNOWN_TOLERANCE", 3),
+    unknownTolerance: num("UNKNOWN_TOLERANCE", 3, 1),
     separatePush: bool("SEPARATE_PUSH", false),
     allowAnyCluster: bool("ALLOW_ANY_CLUSTER", false),
-    marketRefreshTicks: num("MARKET_REFRESH_TICKS", 30),
+    marketRefreshTicks: num("MARKET_REFRESH_TICKS", 30, 1),
     heartbeatUrl: process.env.HEARTBEAT_URL,
   };
 }

@@ -44,11 +44,12 @@
 //! # Withdrawal is two-step, deliberately
 //!
 //! A request is recorded, and only after `withdraw_delay_seconds` can it be
-//! executed. This is not ceremony. Pool AUM jumps when a liquidation settles,
-//! and a same-transaction deposit-then-withdraw brackets that jump for free.
-//! Solana has no public mempool, but Jito bundles make bracketing an observed
-//! transaction entirely practical, so the delay is what makes the sandwich
-//! unprofitable rather than merely inconvenient.
+//! executed. The delay alone does not prevent entering before a trader loss is
+//! realized or leaving before a trader profit is paid. Until open claims can be
+//! valued consistently, deposits and redemptions require both trader collateral
+//! and profit reserves to be zero across the pool. Requests, cancellations and
+//! position settlement remain available. This is containment, with potentially
+//! indefinite LP lockup while positions remain open, rather than marked NAV.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
@@ -80,13 +81,10 @@ pub const MAX_WITHDRAW_DELAY_SECONDS: u32 = 24 * 60 * 60;
 
 /// Hard ceiling on `pool.max_utilization_bps`: 20%.
 ///
-/// This constant is milestone 5's entire answer to the LP share-pricing
-/// question, and it is a **bound rather than a fix**. Share price comes off
-/// `pool.quote_deposited`, which does not mark open positions to market, so it
-/// can overstate what a share is worth. The overstatement is bounded by what is
-/// reserved against those positions, and `reserved_quote / quote_deposited` is
-/// exactly what this caps. So the worst-case mispricing, as a fraction of AUM,
-/// **is** `max_utilization_bps`.
+/// This bounds reserved profit exposure, not LP valuation error in both
+/// directions. Unsettled trader losses can also understate LP equity. LP flows
+/// therefore require a pool without open claims; the ceiling still limits new
+/// position risk and preserves backing for existing profit caps.
 ///
 /// The alternative — computing the pool's true liability — was designed and
 /// then deleted for cause. That liability is `Σ max(0, min(equity_i, cap_i))`,
@@ -111,7 +109,8 @@ pub struct Pool {
     pub quote_vault: Pubkey,
     /// Shares outstanding. Mirrors `share_mint.supply` and is asserted equal.
     pub total_shares: u64,
-    /// Liquidity providers' equity. **This is AUM.** Never `quote_vault.amount`.
+    /// Tracked LP equity. It prices shares only with no open trader claims;
+    /// otherwise it is not marked NAV. Never derived from `quote_vault.amount`.
     pub quote_deposited: u64,
     /// Trader collateral held by the pool on their behalf. Not LP equity, and
     /// not available for withdrawal.
@@ -132,17 +131,16 @@ pub struct Pool {
     /// Hard cap on `quote_deposited`. Essential on the way to mainnet: it bounds
     /// what can be lost while the protocol is still unproven.
     pub max_aum_quote: u64,
-    /// 128 originally, then 120 while a `min_liquidity_quote: u64` sat here.
-    ///
-    /// Those eight bytes were returned to the reserve rather than left
-    /// declared-and-unused. The field was never written and never read: the real
-    /// floor is [`sakura_perps_risk::pool::MINIMUM_LIQUIDITY`], a crate constant
-    /// consumed inside `shares_for_deposit`. A field whose name promises a
-    /// configurable minimum that does not exist is worse than no field at all —
-    /// an operator sets it, observes nothing, and concludes the floor is off.
-    /// `INIT_SPACE` is unchanged, and the live devnet pool already reads zero in
-    /// those bytes, so nothing changes on chain.
-    pub _reserved: [u8; 128],
+    /// Integral of floored utilization basis points over elapsed seconds.
+    /// Every exposure mutation checkpoints the old ratio before changing it.
+    pub utilization_integral: u128,
+    /// Monotonic clock high-water mark for the integral.
+    pub utilization_last_ts: i64,
+    /// Legacy pools activate only after all old claims have settled. Missing
+    /// historical exposure is never reconstructed from a caller-selected ratio.
+    pub utilization_initialized: bool,
+    /// New accounting fields consume reserved bytes; account length is fixed.
+    pub _reserved: [u8; 103],
 }
 
 /// A pending withdrawal. Created by `request_withdraw`, consumed by `lp_withdraw`.
@@ -192,9 +190,8 @@ pub fn handle_initialize_pool(
         PerpsError::WithdrawDelayTooLong
     );
     // The same predicate `set_pool_limits` enforces, and for the same reason:
-    // `max_utilization_bps` **is** this milestone's bound on how far an LP share
-    // price can be overstated, so a ceiling settable here but not there would
-    // mean the bound held only for pools whose admin happened to call the
+    // `max_utilization_bps` bounds reserved profit exposure. Enforcing it only
+    // on updates would leave the bound dependent on an admin having called the
     // setter. A pool created at 9 999 bps admits reserving essentially every
     // asset it has, which is not a ceiling — and no later instruction forces a
     // correction, because nothing lowers the field on its own.
@@ -218,6 +215,7 @@ pub fn handle_initialize_pool(
     pool.withdraw_delay_seconds = params.withdraw_delay_seconds;
     pool.max_utilization_bps = params.max_utilization_bps;
     pool.max_aum_quote = params.max_aum_quote;
+    checkpoint_utilization(pool, &Clock::get()?)?;
 
     emit!(PoolInitialized {
         pool: pool.key(),
@@ -236,6 +234,8 @@ pub fn handle_lp_deposit(ctx: Context<LpDeposit>, amount: u64, min_shares_out: u
         PerpsError::DepositsPaused
     );
     require!(amount > 0, PerpsError::ZeroAmount);
+    assert_lp_valuation_available(&ctx.accounts.pool)?;
+    checkpoint_utilization(&mut ctx.accounts.pool, &Clock::get()?)?;
 
     // Measure what actually arrived rather than trusting the requested amount.
     // A Token-2022 mint with a transfer fee delivers less than was sent, and
@@ -270,10 +270,9 @@ pub fn handle_lp_deposit(ctx: Context<LpDeposit>, amount: u64, min_shares_out: u
 
     let pool = &mut ctx.accounts.pool;
     // Snapshotted before anything moves, for I2's monotone form. A deposit
-    // raises `quote_deposited` and never touches `reserved_quote`, so it can
-    // only lower utilisation — and it must not be blocked by a ceiling an admin
-    // lowered, because it is one of only two actions that bring the pool back
-    // under one.
+    // raises `quote_deposited` and never touches `reserved_quote`. The LP
+    // valuation gate above already requires a zero reserve; retain the shared
+    // invariant check without making it a substitute for that gate.
     let utilisation_before = UtilisationCheck::NotWorsened {
         reserved_quote: pool.reserved_quote,
         quote_deposited: pool.quote_deposited,
@@ -420,8 +419,10 @@ pub fn handle_lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Resu
         exchange.paused_flags & PauseFlags::LP_WITHDRAW == 0,
         PerpsError::WithdrawalsPaused
     );
+    assert_lp_valuation_available(&ctx.accounts.pool)?;
 
     let clock = Clock::get()?;
+    checkpoint_utilization(&mut ctx.accounts.pool, &clock)?;
     let request = &ctx.accounts.withdraw_request;
 
     // Both clocks. The timestamp is the policy; the slot check additionally
@@ -585,6 +586,57 @@ pub fn handle_lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Resu
     )
 }
 
+/// Tracked equity prices LP shares only after every trader claim has settled.
+///
+/// Checking both counters fails closed if either is nonzero. A reserve-only
+/// check would miss collateral whose loss is not yet realized; a collateral-only
+/// check would miss outstanding profit commitments. Do not put this gate in
+/// the shared invariant assertion: closes must remain able to empty the book.
+fn assert_lp_valuation_available(pool: &Pool) -> Result<()> {
+    require!(
+        pool.locked_quote == 0 && pool.reserved_quote == 0,
+        PerpsError::LpValuationUnavailable
+    );
+    Ok(())
+}
+
+/// Integrate the current pool ratio before any instruction changes equity or
+/// reserves. Repeated calls at one timestamp are harmless. A backwards clock
+/// never rewinds the high-water mark or charges an interval twice.
+///
+/// An active legacy book cannot be migrated accurately: its exposure history
+/// was never recorded. It remains on the legacy exit path with new opens
+/// disabled until collateral and reserves both reach zero.
+pub(crate) fn checkpoint_utilization(pool: &mut Pool, clock: &Clock) -> Result<bool> {
+    if !pool.utilization_initialized {
+        if pool.locked_quote != 0 || pool.reserved_quote != 0 {
+            return Ok(false);
+        }
+        pool.utilization_integral = 0;
+        pool.utilization_last_ts = clock.unix_timestamp;
+        pool.utilization_initialized = true;
+        return Ok(true);
+    }
+    if clock.unix_timestamp <= pool.utilization_last_ts {
+        return Ok(true);
+    }
+    let elapsed = clock
+        .unix_timestamp
+        .checked_sub(pool.utilization_last_ts)
+        .ok_or(PerpsError::MathOverflow)? as u128;
+    let utilization = risk_pool::utilization_bps(
+        u128::from(pool.reserved_quote),
+        u128::from(pool.quote_deposited),
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+    pool.utilization_integral = utilization
+        .checked_mul(elapsed)
+        .and_then(|delta| pool.utilization_integral.checked_add(delta))
+        .ok_or(PerpsError::MathOverflow)?;
+    pool.utilization_last_ts = clock.unix_timestamp;
+    Ok(true)
+}
+
 /// What the pool has recorded that it owes: liquidity-provider equity, trader
 /// collateral held on their behalf, and fees owed to the recipient.
 ///
@@ -621,10 +673,8 @@ fn assert_vault_solvent(vault: &InterfaceAccount<'_, TokenAccount>, pool: &Pool)
 /// at [`M5_MAX_UTILIZATION_BPS`], so a pool whose ceiling was previously higher
 /// cannot be raised back out of that state. Asserting the ceiling **absolutely**
 /// at the end of every value-touching instruction then reverts *every close*,
-/// including `emergency_close_position`, and reverts `lp_deposit` too — which is
-/// the only other action that lowers utilisation. Every position and all
-/// liquidity-provider equity is trapped, permanently, with no admin action and
-/// no permissionless action that recovers it.
+/// including `emergency_close_position`. LP flows require all claims to settle,
+/// so blocking those closes would also trap all liquidity-provider equity.
 ///
 /// That is the exact failure mode the module docs warn about for I4 — "an
 /// unconditionally-asserted falsified invariant bricks every instruction that
@@ -1192,8 +1242,8 @@ pub fn handle_set_pool_limits(
     max_aum_quote: u64,
     max_utilization_bps: u16,
 ) -> Result<()> {
-    // Strictly inside `(0, M5_MAX_UTILIZATION_BPS]`. The upper bound is the
-    // milestone's entire answer to LP share mispricing — see the constant. The
+    // Strictly inside `(0, M5_MAX_UTILIZATION_BPS]`. The upper bound limits
+    // reserved profit exposure independently of the LP valuation gate. The
     // strict lower bound is separate: a zero ceiling makes every open
     // impossible, which is what quarantining a market is for, and doing it
     // pool-wide by parameter would be an outage disguised as a setting.
@@ -1212,16 +1262,10 @@ pub fn handle_set_pool_limits(
     // — a gate that reads a tightening as safe and then refuses to let you
     // undo it.
     //
-    // What a lowering blocks is exactly two things: `open_position` and
-    // `lp_withdraw`, the two paths that can raise utilisation. It does **not**
-    // block a close, an admin settlement, an emergency close, or a deposit —
-    // those are judged by `UtilisationCheck::NotWorsened` instead, and that is
-    // not a nicety. Judging them by the ceiling would mean an admin lowering it
-    // below current utilisation reverted every exit *and* the deposits that
-    // would bring utilisation back down, with the setter's own cap at
-    // `M5_MAX_UTILIZATION_BPS` making the state unrecoverable. The claim that a
-    // lowering invalidates no open position is true because of that split, not
-    // in spite of it.
+    // A lowering blocks new risk but must not block settlement: those paths
+    // use `UtilisationCheck::NotWorsened`. Deposits and redemptions separately
+    // require every position to have settled. Keeping closes available is
+    // therefore also necessary to make LP flows available again.
     //
     // Deliberately not followed by `assert_pool_invariants`: this instruction
     // moves no tokens, and asserting the ceiling here would turn the permitted
@@ -1333,6 +1377,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lp_valuation_requires_both_claim_counters_to_be_zero() {
+        let mut pool = test_pool(1_000, 0);
+        assert_lp_valuation_available(&pool).expect("a settled pool has known equity");
+        for (locked, reserved) in [(1, 0), (0, 1), (1, 1)] {
+            pool.locked_quote = locked;
+            pool.reserved_quote = reserved;
+            expect_error(
+                assert_lp_valuation_available(&pool),
+                PerpsError::LpValuationUnavailable,
+            );
+        }
+    }
+
     /// **I1.** The comparison is `>=`, so a donated surplus is harmless and a
     /// single missing base unit is not.
     #[test]
@@ -1358,8 +1416,8 @@ mod tests {
     /// pool initialised at a higher ceiling, positions opened legally under it,
     /// and then `set_pool_limits` called to bring the ceiling down to
     /// `M5_MAX_UTILIZATION_BPS`. Judged by the ceiling, every close reverts —
-    /// including `emergency_close_position`, the designated escape hatch — and
-    /// `lp_deposit`, the only other action that lowers utilisation, reverts too.
+    /// including `emergency_close_position`, the designated escape hatch.
+    /// LP flows cannot resume until those claims settle.
     /// The ceiling cannot be raised back, because the setter caps at exactly the
     /// value now being violated. Every position and all liquidity is trapped,
     /// permanently.

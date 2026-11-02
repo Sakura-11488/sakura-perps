@@ -7,7 +7,8 @@
  * every simulation fail, and the keeper would report an empty book, forever,
  * while being completely broken — and it would look exactly like a quiet day.
  *
- * So `healthy` is a closed set of one: `Custom(6062)` and nothing else.
+ * `classifyLiquidation` first checks the final instruction index and runtime
+ * failure provenance; only then may the protocol's `Custom(6062)` mean healthy.
  * Everything unrecognised is `unknown`, which alarms and eventually exits.
  */
 import type { Idl } from "@coral-xyz/anchor";
@@ -109,8 +110,37 @@ export function customCodeOf(err: unknown): number | null {
 export function failingIndexOf(err: unknown): number | null {
   const asAny = err as Record<string, unknown>;
   const ie = asAny?.InstructionError as unknown;
-  if (Array.isArray(ie) && typeof ie[0] === "number") return ie[0];
+  if (Array.isArray(ie) && ie.length === 2 && Number.isSafeInteger(ie[0]) && ie[0] >= 0)
+    return ie[0];
   return null;
+}
+
+/** Only the pinned liquidation instruction may speak for a position's health. */
+export function classifyLiquidation(
+  err: unknown,
+  logs: string[],
+  table: CodeTable,
+  liquidationIndex: number,
+  programId: string,
+): Verdict {
+  if (err === null) return { kind: "liquidatable" };
+  if (failingIndexOf(err) !== liquidationIndex)
+    return {
+      kind: "unknown",
+      detail: "failure outside the liquidation instruction or malformed instruction index",
+    };
+  // Runtime failure lines are distinct from spoofable `Program log:` messages.
+  // A CPI's custom code can bubble through the final instruction unchanged.
+  const failures = logs.flatMap((line) => {
+    const match = /^Program ([1-9A-HJ-NP-Za-km-z]+) failed:/.exec(line);
+    return match ? [match[1]] : [];
+  });
+  if (!failures.length || failures.some((program) => program !== programId))
+    return {
+      kind: "unknown",
+      detail: "liquidation error program provenance unavailable or mismatched",
+    };
+  return classify(err, logs, table);
 }
 
 export function classify(err: unknown, logs: string[], table: CodeTable): Verdict {

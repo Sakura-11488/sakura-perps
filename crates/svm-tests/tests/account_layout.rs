@@ -10,7 +10,9 @@
 //! actually matters at runtime: whether an account written by the **previous**
 //! build — all-zero in the bytes stage 3 carved out of `_reserved` — still
 //! deserialises, and still reads as the "never quarantined, never priced,
-//! zero-spread" state the program documents those zeros to mean.
+//! zero-spread" state the program documents those zeros to mean. Intent counters
+//! also decode as zero: legacy positions retain generation zero, while new opens
+//! allocate their first generation from the market's zero counter.
 //!
 //! No LiteSVM here, and no compiled program: this is a Borsh round trip over the
 //! same types the runtime uses, so it runs even where the Solana toolchain does
@@ -69,13 +71,11 @@ where
     decoded
 }
 
-/// Every frozen length, and the stage-3 fields all reading zero.
+/// Every frozen length, and the fields carved from reserved bytes reading zero.
 ///
-/// Those three fields on `Market` and the one on `Position` were taken **out of
-/// `_reserved`** rather than appended, which is the only reason the lengths are
-/// unchanged. Zero is a meaningful value for each: never quarantined, never
-/// priced, and — for `spread_bps` — the zero-spread case, at which
-/// `execution_price` is total and therefore cannot make an exit unpriceable.
+/// Recovery fields and intent counters were taken **out of `_reserved`** rather
+/// than appended. Zero marks recovery snapshots and historical accrual as
+/// unproven/uninitialized, and gives legacy positions their explicit generation.
 #[test]
 fn the_frozen_account_lengths_still_decode_a_legacy_buffer() {
     let exchange: Exchange = legacy_zero_account(304);
@@ -83,6 +83,9 @@ fn the_frozen_account_lengths_still_decode_a_legacy_buffer() {
 
     let pool: Pool = legacy_zero_account(252);
     assert_eq!(pool.max_utilization_bps, 0);
+    assert_eq!(pool.utilization_integral, 0);
+    assert_eq!(pool.utilization_last_ts, 0);
+    assert!(!pool.utilization_initialized);
     let _: WithdrawRequest = legacy_zero_account(121);
 
     let feed: QualifiedFeed = legacy_zero_account(205);
@@ -99,10 +102,23 @@ fn the_frozen_account_lengths_still_decode_a_legacy_buffer() {
         "stage 3's market fields came out of _reserved, so a legacy market \
          reads zero for all three"
     );
+    assert_eq!(
+        (market.risk_revision, market.next_position_id),
+        (0, 0),
+        "legacy markets begin with zero intent counters without changing length"
+    );
+    assert_eq!(market.last_good_price_source, 0);
+    assert_eq!(market.borrow_utilization_checkpoint, 0);
+    assert!(!market.borrow_integral_initialized);
+    assert_eq!(market.funding_remainder_carry, 0);
 
     let position: Position = legacy_zero_account(240);
     assert_eq!(
         position.spread_bps, 0,
         "a position written before the field existed reads the zero-spread case"
+    );
+    assert_eq!(
+        position.position_id, 0,
+        "legacy positions remain closeable by explicitly signing generation zero"
     );
 }

@@ -16,7 +16,7 @@ import { Program } from "@coral-xyz/anchor";
 import { PublicKey, Keypair, Connection } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import fs from "fs";
-import type { SakuraPerps } from "../target/types/sakura_perps";
+import type { SakuraPerps } from "../idl/sakura_perps";
 
 const PROGRAM_ID = new PublicKey("5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y");
 const USDC_DEVNET = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");

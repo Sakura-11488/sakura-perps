@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { SakuraPerps } from "../target/types/sakura_perps";
+import type { SakuraPerps } from "../idl/sakura_perps";
 import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createMint } from "@solana/spl-token";
 import { assert } from "chai";

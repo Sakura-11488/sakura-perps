@@ -2515,6 +2515,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakura-perps-rooms"
+version = "0.1.0"
+dependencies = [
+ "sakura-perps-risk",
+]
+
+[[package]]
 name = "sakura-perps-svm-tests"
 version = "0.1.0"
 dependencies = [

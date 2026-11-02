@@ -30,4 +30,4 @@ cluster = "devnet"
 wallet = "~/.config/solana/sakura-perps-devnet-deployer.json"
 
 [scripts]
-test = "pnpm exec ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "pnpm exec mocha --require ts-node/register -t 1000000 tests/**/*.ts"

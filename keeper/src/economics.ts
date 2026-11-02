@@ -74,7 +74,8 @@ export function decide(
 
   // Bid a bounded fraction of what we are about to earn, never more than the
   // hard cap. Winning a race at a loss is still a loss.
-  const units = Math.max(1, unitsConsumed);
+  // Match the final CU limit, which determines the charged priority fee.
+  const units = Math.min(1_400_000, Math.ceil(Math.max(unitsConsumed, 50_000) * 1.2));
   const budgetLamports = Math.min(
     cfg.priorityFeeCapLamports,
     Math.floor((Number(fee.keeperFeeQuote) * cfg.priorityFeeShareBps) / 10_000),

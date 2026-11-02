@@ -182,7 +182,9 @@ async function main(): Promise<void> {
   }
   console.log("all preflight checks passed");
   if (positions.length === 0) {
-    console.log("note: zero positions. The keeper is live and correct, and has nothing to do.");
+    console.log(
+      "note: zero positions. Account reads passed; liquidation execution remains unproven by this preflight.",
+    );
   }
 }
 

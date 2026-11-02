@@ -18,7 +18,7 @@ import { Program } from "@coral-xyz/anchor";
 import { PublicKey, Keypair, Connection } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import fs from "fs";
-import type { SakuraPerps } from "../target/types/sakura_perps";
+import type { SakuraPerps } from "../idl/sakura_perps";
 
 const PROGRAM_ID = new PublicKey("5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y");
 

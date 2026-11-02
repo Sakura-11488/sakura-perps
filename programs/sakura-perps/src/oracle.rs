@@ -1,9 +1,8 @@
 //! Reading a Pyth price feed and handing it to the risk crate for validation.
 //!
-//! This module does exactly two things: deserialise a `PriceUpdateV2` account,
-//! and translate errors. Every judgement about whether a price is safe to trade
-//! on lives in [`sakura_perps_risk::oracle`], which has no Solana dependency and
-//! is therefore testable exhaustively in milliseconds.
+//! Deserializes a `PriceUpdateV2` account, translates validation errors, and
+//! records strict cache provenance. Numeric oracle guards live in
+//! [`sakura_perps_risk::oracle`], which has no Solana dependency.
 //!
 //! # Why there is no mock oracle behind a feature flag
 //!
@@ -40,7 +39,37 @@ use sakura_perps_risk::oracle::{
 };
 use sakura_perps_risk::RiskError;
 
-use crate::PerpsError;
+use crate::{market::Market, PerpsError};
+
+/// Cache format that records a raw spot accepted under the trading guards.
+/// Zero is legacy state with no evidence of which guards or clock were used.
+pub(crate) const STRICT_PRICE_SOURCE_VERSION: u8 = 1;
+
+/// Preserve the newest strict spot and its upstream publication time while the
+/// market is active. Quarantine freezes this common emergency reference: exits
+/// cannot select a different terminal price by refreshing between settlements.
+///
+/// Call only after `load_price` succeeds with this market's trading guards.
+/// Liquidation's looser guards and an EMA-derived execution price are not cache
+/// provenance. An old/equal observation is a harmless no-op, never a reason to
+/// reject an otherwise valid close. The first strict write replaces legacy
+/// state without comparing its old transaction timestamp to a publish time.
+pub(crate) fn record_strict_price(market: &mut Market, price: &ValidatedPrice) -> bool {
+    if market.is_quarantined()
+        || !matches!(
+            market.last_good_price_source,
+            0 | STRICT_PRICE_SOURCE_VERSION
+        )
+        || (market.last_good_price_source == STRICT_PRICE_SOURCE_VERSION
+            && price.publish_time <= market.last_good_price_ts)
+    {
+        return false;
+    }
+    market.last_good_price = price.price;
+    market.last_good_price_ts = price.publish_time;
+    market.last_good_price_source = STRICT_PRICE_SOURCE_VERSION;
+    true
+}
 
 /// Read and fully validate a price from a Pyth `PriceUpdateV2` account.
 ///
@@ -97,27 +126,17 @@ pub fn load_price(
 /// two are commensurable **by construction** rather than by comparison, so
 /// there is no state in which they could disagree and no check to forget.
 ///
-/// `ema_conf` is read from the account and deliberately discarded. The EMA is a
-/// divergence reference and never a settlement price; gating on its confidence
-/// would let a wide EMA band stop trading on a perfectly tight spot price.
+/// `ema_conf` is not used. The EMA influences the existing exit-price clamp,
+/// so it remains an economic oracle assumption, not independent evidence that
+/// the clamped price is fair. Only the validated raw spot can enter the strict
+/// emergency cache; the clamp's synthetic midpoint cannot.
 ///
 /// # A broken EMA returns zero rather than an error
 ///
-/// `normalize_price` rejects a non-positive mantissa outright, so propagating
-/// that would let a single unusable field — on a value the protocol never
-/// *settles* against — take down `close_position`, `admin_settle_position`
-/// **and** `refresh_market_price` at once. That is a rejection at exit, which is
-/// exactly what the divergence clamp exists to avoid, plus the loss of the
-/// permissionless instruction that keeps `last_good_price` advancing while the
-/// other two are down. The only remaining way out of a position would be a
-/// quarantine and a day's wait.
-///
-/// Zero is the "no reference" value both consumers already handle, and they
-/// handle it in opposite directions on purpose. `clamp_to_ema_band` passes the
-/// spot through untouched — it has already cleared every guard, so exiting on it
-/// is safe. `diverges_beyond` errors on a zero reference, so `open_position`
-/// fails closed: refusing to open is a safe default, and opening is the one leg
-/// where that is true, because there is no position yet to trap.
+/// A nonpositive EMA has no usable reference. Exits pass the already validated
+/// spot through `clamp_to_ema_band` unchanged in this case; new entries fail
+/// closed because `diverges_beyond` rejects a zero reference. Strict cache refresh
+/// calls `load_price` directly and does not depend on the EMA at all.
 pub fn load_price_and_ema(
     price_update: &Account<'_, PriceUpdateV2>,
     feed_id: &[u8; 32],
@@ -187,4 +206,63 @@ pub fn liquidation_guards(
     expected_exponent: i32,
 ) -> OracleGuards {
     OracleGuards::for_liquidation(min_price, max_price, expected_exponent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::market::tests::test_market;
+
+    fn quote(price: u128, publish_time: i64) -> ValidatedPrice {
+        ValidatedPrice {
+            price,
+            confidence: 1,
+            publish_time,
+            posted_slot: 10,
+        }
+    }
+
+    #[test]
+    fn strict_cache_uses_publication_time_and_never_regresses() {
+        let mut market = test_market();
+        // Legacy transaction time is not comparable to the new publication time.
+        market.last_good_price = 99;
+        market.last_good_price_ts = 1_000;
+        assert!(record_strict_price(&mut market, &quote(100, 900)));
+        assert_eq!(market.last_good_price_source, STRICT_PRICE_SOURCE_VERSION);
+        assert_eq!(
+            (market.last_good_price, market.last_good_price_ts),
+            (100, 900)
+        );
+        for stale in [quote(200, 899), quote(300, 900)] {
+            assert!(!record_strict_price(&mut market, &stale));
+            assert_eq!(
+                (market.last_good_price, market.last_good_price_ts),
+                (100, 900)
+            );
+        }
+        assert!(record_strict_price(&mut market, &quote(400, 901)));
+        assert_eq!(
+            (market.last_good_price, market.last_good_price_ts),
+            (400, 901)
+        );
+    }
+
+    #[test]
+    fn quarantine_freezes_the_reference_and_cannot_initialize_legacy_provenance() {
+        let mut market = test_market();
+        assert!(record_strict_price(&mut market, &quote(100, 900)));
+        market.max_oi_usd = 0;
+        assert!(!record_strict_price(&mut market, &quote(200, 901)));
+        assert_eq!(
+            (market.last_good_price, market.last_good_price_ts),
+            (100, 900)
+        );
+        market.last_good_price_source = 0;
+        assert!(!record_strict_price(&mut market, &quote(300, 902)));
+        assert_eq!(market.last_good_price_source, 0);
+        market.max_oi_usd = 1;
+        assert!(record_strict_price(&mut market, &quote(300, 902)));
+        assert_eq!(market.last_good_price_source, STRICT_PRICE_SOURCE_VERSION);
+    }
 }

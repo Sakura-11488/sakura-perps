@@ -14,6 +14,52 @@ export type SakuraPerps = {
   },
   "instructions": [
     {
+      "name": "acceptAdmin",
+      "docs": [
+        "Accepts the current nomination, atomically revoking the outgoing admin.",
+        "Only the nominated signer can accept; clearing the nomination also",
+        "prevents an old acceptance from being reused after the transfer."
+      ],
+      "discriminator": [
+        112,
+        42,
+        45,
+        90,
+        116,
+        181,
+        13,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pendingAdmin",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "adminSettlePosition",
       "docs": [
         "Liquidates a position that no longer meets its maintenance margin.",
@@ -203,6 +249,51 @@ export type SakuraPerps = {
         },
         {
           "name": "tokenProgram"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancelAdminTransfer",
+      "docs": [
+        "Cancels an outstanding nomination. The nominee cannot cancel it or",
+        "accept it after this instruction succeeds."
+      ],
+      "discriminator": [
+        38,
+        131,
+        157,
+        31,
+        240,
+        137,
+        44,
+        215
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -761,20 +852,11 @@ export type SakuraPerps = {
       "docs": [
         "Winds a position down with **no oracle at all**.",
         "",
-        "This is the exit that has to survive everything else failing, so it takes",
-        "no price account, no feed account and no pause gate, and it settles",
-        "against `market.last_good_price` — a number kept on the market itself by",
-        "every successful price read, including the permissionless",
-        "`refresh_market_price`, precisely so that pausing the trading paths",
-        "cannot freeze it.",
-        "",
-        "Loosening the oracle guards was the alternative and it is not a fix: a",
-        "loosened guard still fails when the oracle is *absent*, and absent is",
-        "what revocation, delisting and an outage all produce.",
-        "",
-        "Two preconditions, both public and both slow: the market must be",
-        "quarantined, and it must have been for a day. A wind-down is therefore",
-        "announced by the chain before any value moves."
+        "Admin-only, with no price/feed account or pause gate. Requires a strict",
+        "raw oracle snapshot recorded before quarantine and frozen during it.",
+        "Missing or legacy unproven cache fails closed; entry price is not a",
+        "substitute. A valid historical snapshot is not guaranteed economically",
+        "fair at settlement time. The market must have been quarantined for a day."
       ],
       "discriminator": [
         192,
@@ -1980,6 +2062,61 @@ export type SakuraPerps = {
       ]
     },
     {
+      "name": "proposeAdmin",
+      "docs": [
+        "Nominates the next admin without granting it any authority yet.",
+        "",
+        "The current admin may replace an outstanding nomination or cancel it.",
+        "A mistyped address cannot take control unless that address signs an",
+        "acceptance. Rotation remains available while every trading action is",
+        "paused. This rotates the exchange admin, not the program upgrade authority",
+        "or fee recipient, and cannot recover an already-lost admin key."
+      ],
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "exchange",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  99,
+                  104,
+                  97,
+                  110,
+                  103,
+                  101
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "newAdmin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "qualifyFeed",
       "docs": [
         "Declares a Pyth feed safe to price markets against.",
@@ -2083,17 +2220,10 @@ export type SakuraPerps = {
       "docs": [
         "Advances a market's oracle-free settlement reference. Permissionless.",
         "",
-        "Loads under the trading guards, clamps the mid into its own EMA band and",
-        "writes `last_good_price`. Touches no value, moves no tokens, and grants",
-        "the caller nothing.",
-        "",
-        "It exists so that reference cannot be frozen. Without it, an admin could",
-        "pause opening and closing, wait for the market to move, and then",
-        "emergency-close every position at the stale price those two instructions",
-        "had left behind. With it, anyone can advance the reference at any time",
-        "for the cost of one transaction, and freezing it requires the feed itself",
-        "to be dead — in which case `last_good_price` genuinely is the last honest",
-        "price there was. That is why it is neither pausable nor admin-gated."
+        "Loads under strict trading guards and records a newer raw oracle price",
+        "with its publication time and provenance. Touches no value and moves no",
+        "tokens. Active markets can refresh while trading is paused. Quarantine",
+        "freezes the cache, including against this permissionless instruction."
       ],
       "discriminator": [
         66,
@@ -2475,12 +2605,10 @@ export type SakuraPerps = {
       "docs": [
         "Sets the pool's deposit cap and its utilisation ceiling. Admin-only.",
         "",
-        "`max_utilization_bps` had no setter at all until now — it was written",
-        "once at `initialize_pool` and the live devnet pool was stuck with",
-        "whatever it was given. That matters more than it sounds: the ceiling is",
-        "this milestone's bound on how far an LP share price can be overstated,",
-        "capped at [`M5_MAX_UTILIZATION_BPS`], so leaving it unsettable meant the",
-        "bound could not actually be applied to a running pool."
+        "`max_utilization_bps` is capped at [`M5_MAX_UTILIZATION_BPS`]. It bounds",
+        "reserved profits relative to pool equity, not LP valuation error or",
+        "omitted trader losses. LP deposits/redemptions separately require a flat",
+        "pool until liability-aware valuation and bounded exits are implemented."
       ],
       "discriminator": [
         126,
@@ -2555,12 +2683,10 @@ export type SakuraPerps = {
         "tighten a market while the protocol is paused, and quarantining it by",
         "setting `max_oi_usd = 0` is the tightest action available.",
         "",
-        "There is no gate on open positions. Every parameter a position depends",
-        "on is snapshotted at open or consumed at open, and the one change that",
-        "could genuinely make a market unclosable — a raised borrow rate — is",
-        "bounded by a ceiling rather than by a gate. A gate would have been worse",
-        "than useless: raising the rate reads as tightening, and lowering it back",
-        "would read as a loosening that the positions it bricked then block."
+        "Existing exposure does not block a retune. Accrue at the old rates first;",
+        "replacement borrow/funding parameters apply prospectively. New entries",
+        "must sign the resulting risk revision. Position-snapshotted exit terms",
+        "remain unchanged; oracle policy and quarantine retain their live gates."
       ],
       "discriminator": [
         203,
@@ -2573,6 +2699,23 @@ export type SakuraPerps = {
         235
       ],
       "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
         {
           "name": "exchange",
           "pda": {
@@ -2645,9 +2788,9 @@ export type SakuraPerps = {
         "",
         "It reads **no oracle**. Requiring a fresh price would make settlement",
         "fail exactly when the oracle is degraded, which is when accrual matters",
-        "most. It does read the pool, because borrow accrues against pool-wide",
-        "utilisation — so borrow is coupled across markets, and opening a position",
-        "in one raises the borrow rate in every other.",
+        "most. It checkpoints the writable canonical pool's historical utilization",
+        "before a market consumes that integral. Borrow is coupled across markets",
+        "prospectively, without repricing elapsed intervals at today's ratio.",
         "",
         "The same routine runs at the head of every position instruction. This one",
         "exists so accrual does not depend on trading activity."
@@ -2666,9 +2809,9 @@ export type SakuraPerps = {
         {
           "name": "pool",
           "docs": [
-            "Read-only, and required: borrow accrual is a function of pool-wide",
-            "utilisation."
+            "Checkpoints pool-wide utilization before this market consumes it."
           ],
+          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -2792,6 +2935,45 @@ export type SakuraPerps = {
     }
   ],
   "events": [
+    {
+      "name": "adminTransferCancelled",
+      "discriminator": [
+        93,
+        23,
+        69,
+        55,
+        216,
+        128,
+        106,
+        56
+      ]
+    },
+    {
+      "name": "adminTransferProposed",
+      "discriminator": [
+        203,
+        168,
+        175,
+        51,
+        239,
+        104,
+        20,
+        85
+      ]
+    },
+    {
+      "name": "adminTransferred",
+      "discriminator": [
+        255,
+        147,
+        182,
+        5,
+        199,
+        217,
+        38,
+        179
+      ]
+    },
     {
       "name": "exchangeInitialized",
       "discriminator": [
@@ -3385,9 +3567,128 @@ export type SakuraPerps = {
       "code": 6068,
       "name": "notKeeperTokenOwner",
       "msg": "Keeper token account must be owned by the keeper signing the liquidation."
+    },
+    {
+      "code": 6069,
+      "name": "invalidAdmin",
+      "msg": "The proposed admin must not be the zero public key."
+    },
+    {
+      "code": 6070,
+      "name": "adminUnchanged",
+      "msg": "The proposed admin must differ from the current admin."
+    },
+    {
+      "code": 6071,
+      "name": "noPendingAdmin",
+      "msg": "There is no pending admin transfer."
+    },
+    {
+      "code": 6072,
+      "name": "notPendingAdmin",
+      "msg": "Only the nominated admin may accept the transfer."
+    },
+    {
+      "code": 6073,
+      "name": "lpValuationUnavailable",
+      "msg": "LP deposits and redemptions require a flat pool until liability-aware valuation is implemented."
+    },
+    {
+      "code": 6074,
+      "name": "marketRiskRevisionMismatch",
+      "msg": "Market risk policy changed after this open intent was prepared."
+    },
+    {
+      "code": 6075,
+      "name": "intentExpired",
+      "msg": "Open intent requires a nonzero deadline that has not passed."
+    },
+    {
+      "code": 6076,
+      "name": "positionGenerationMismatch",
+      "msg": "Close intent does not refer to this position generation."
+    },
+    {
+      "code": 6077,
+      "name": "emergencyPriceUnavailable",
+      "msg": "Emergency settlement requires a proven strict oracle snapshot; legacy or missing prices cannot be substituted."
+    },
+    {
+      "code": 6078,
+      "name": "poolMigrationRequired",
+      "msg": "The legacy pool must settle its open positions before accepting new risk under historical utilization accounting."
+    },
+    {
+      "code": 6079,
+      "name": "marketMigrationRequired",
+      "msg": "A market with legacy exposure cannot activate historical utilization accounting."
     }
   ],
   "types": [
+    {
+      "name": "adminTransferCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pendingAdmin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "adminTransferProposed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "previousPendingAdmin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pendingAdmin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "adminTransferred",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "exchange",
+            "type": "pubkey"
+          },
+          {
+            "name": "previousAdmin",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
     {
       "name": "closePositionParams",
       "docs": [
@@ -3405,6 +3706,14 @@ export type SakuraPerps = {
               "[`OpenPositionParams::limit_price`]."
             ],
             "type": "u128"
+          },
+          {
+            "name": "expectedPositionId",
+            "docs": [
+              "Exact position generation accepted by this signature, read from the",
+              "position account. A replacement at the same PDA has a different ID."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -3459,7 +3768,8 @@ export type SakuraPerps = {
           {
             "name": "pendingAdmin",
             "docs": [
-              "Proposed admin, who must call an accept instruction to take over."
+              "Proposed admin, who must sign `accept_admin` to take over. Zero means",
+              "no pending transfer; the current admin may replace or cancel a proposal."
             ],
             "type": "pubkey"
           },
@@ -3989,7 +4299,8 @@ export type SakuraPerps = {
           {
             "name": "maxSettleWindowSeconds",
             "docs": [
-              "Caps Δt per settle call, so a long gap cannot accrue in one jump."
+              "Legacy drain-only accrual cap. Retained for account/instruction compatibility;",
+              "migrated books accrue the full elapsed interval."
             ],
             "type": "u32"
           },
@@ -4094,40 +4405,74 @@ export type SakuraPerps = {
           {
             "name": "lastGoodPrice",
             "docs": [
-              "The oracle-free settlement reference: the last price this market",
-              "transacted at, clamped into its own EMA band.",
-              "",
-              "Written by every successful guard-passing price read — both trading",
-              "paths, the admin settlement, and the permissionless",
-              "`refresh_market_price`. It is read out of this account rather than from",
-              "an oracle, which is what lets `emergency_close_position` take no price",
-              "account at all."
+              "Latest strict validated raw oracle price recorded before quarantine.",
+              "Liquidation and admin settlement cannot write this emergency reference."
             ],
             "type": "u128"
           },
           {
             "name": "lastGoodPriceTs",
             "docs": [
-              "When [`Market::last_good_price`] was written. Observability only; it",
-              "gates nothing, deliberately — a freshness gate on it would hand the",
-              "oracle back the veto the field exists to remove."
+              "Oracle publication time, strictly increasing while cache updates are",
+              "allowed. Emergency settlement intentionally has no freshness gate."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "riskRevision",
+            "docs": [
+              "Monotonic revision of the entry risk parameters. An opening signature",
+              "binds this value so a later retune cannot silently change its fees, cap,",
+              "margin requirements, or the terms it snapshots for closing."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "nextPositionId",
+            "docs": [
+              "Last allocated position ID. Every successful open increments it, even",
+              "when reusing a closed owner/market PDA in the same slot. Markets have no",
+              "close/reinitialize instruction, so an owner cannot reset this sequence."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lastGoodPriceSource",
+            "docs": [
+              "1 identifies a strict validated raw oracle observation; zero is legacy."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "borrowUtilizationCheckpoint",
+            "docs": [
+              "Pool utilization-time integral consumed by this market's borrow index."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "borrowIntegralInitialized",
+            "docs": [
+              "Set only after an empty market joins the pool's initialized integral."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "fundingRemainderCarry",
+            "docs": [
+              "Canonical funding numerator remainder in `[0, 3600)`."
             ],
             "type": "i64"
           },
           {
             "name": "reserved",
             "docs": [
-              "128 originally. `quarantined_ts`, `last_good_price` and",
-              "`last_good_price_ts` were taken from here rather than appended, so the",
-              "account's length is unchanged and no existing instance needs",
-              "reallocating. A market written before those fields existed reads zero for",
-              "all three, which is the \"never quarantined, never priced\" case both the",
-              "wind-down delay and `emergency_reference_price` already handle."
+              "Recovery and accounting fields consume the original reserved bytes."
             ],
             "type": {
               "array": [
                 "u8",
-                96
+                54
               ]
             }
           }
@@ -4211,7 +4556,7 @@ export type SakuraPerps = {
           {
             "name": "dt",
             "docs": [
-              "The **clamped** Δt actually accrued, not the wall-clock gap."
+              "Elapsed time accrued; only legacy drain-only markets retain the old cap."
             ],
             "type": "u64"
           }
@@ -4269,6 +4614,21 @@ export type SakuraPerps = {
               "\"unset\" means and only an explicit rejection settles it."
             ],
             "type": "u128"
+          },
+          {
+            "name": "expectedRiskRevision",
+            "docs": [
+              "Exact entry policy accepted by this signature. Read from the market",
+              "when quoting; any subsequent successful retune invalidates the intent."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "validUntilSlot",
+            "docs": [
+              "Last slot in which the intent may execute, inclusive. Zero is invalid."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -4407,7 +4767,8 @@ export type SakuraPerps = {
           {
             "name": "quoteDeposited",
             "docs": [
-              "Liquidity providers' equity. **This is AUM.** Never `quote_vault.amount`."
+              "Tracked LP equity. It prices shares only with no open trader claims;",
+              "otherwise it is not marked NAV. Never derived from `quote_vault.amount`."
             ],
             "type": "u64"
           },
@@ -4471,23 +4832,37 @@ export type SakuraPerps = {
             "type": "u64"
           },
           {
+            "name": "utilizationIntegral",
+            "docs": [
+              "Integral of floored utilization basis points over elapsed seconds.",
+              "Every exposure mutation checkpoints the old ratio before changing it."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "utilizationLastTs",
+            "docs": [
+              "Monotonic clock high-water mark for the integral."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "utilizationInitialized",
+            "docs": [
+              "Legacy pools activate only after all old claims have settled. Missing",
+              "historical exposure is never reconstructed from a caller-selected ratio."
+            ],
+            "type": "bool"
+          },
+          {
             "name": "reserved",
             "docs": [
-              "128 originally, then 120 while a `min_liquidity_quote: u64` sat here.",
-              "",
-              "Those eight bytes were returned to the reserve rather than left",
-              "declared-and-unused. The field was never written and never read: the real",
-              "floor is [`sakura_perps_risk::pool::MINIMUM_LIQUIDITY`], a crate constant",
-              "consumed inside `shares_for_deposit`. A field whose name promises a",
-              "configurable minimum that does not exist is worse than no field at all —",
-              "an operator sets it, observes nothing, and concludes the floor is off.",
-              "`INIT_SPACE` is unchanged, and the live devnet pool already reads zero in",
-              "those bytes, so nothing changes on chain."
+              "New accounting fields consume reserved bytes; account length is fixed."
             ],
             "type": {
               "array": [
                 "u8",
-                128
+                103
               ]
             }
           }
@@ -4665,11 +5040,21 @@ export type SakuraPerps = {
             "type": "u16"
           },
           {
+            "name": "positionId",
+            "docs": [
+              "Market-wide generation allocated at open. The PDA can be reused, but",
+              "this ID cannot: an old signed close must not retire its replacement.",
+              "Taken from reserved bytes; legacy live positions read ID 0 and remain",
+              "closeable by explicitly signing that ID."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "reserved",
             "type": {
               "array": [
                 "u8",
-                62
+                54
               ]
             }
           }

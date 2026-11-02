@@ -29,7 +29,7 @@ import {
 } from "@solana/spl-token";
 import fs from "fs";
 import { createHash } from "crypto";
-import type { SakuraPerps } from "../target/types/sakura_perps";
+import type { SakuraPerps } from "../idl/sakura_perps";
 
 /**
  * Circle's USDC on Solana devnet — the one faucet.circle.com actually dispenses.

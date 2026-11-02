@@ -1,0 +1,45 @@
+{
+  "review_date": "2026-11-02",
+  "purpose": "Research snapshot, not an approved or compatible dependency set",
+  "sakura_baseline": "2bb0f71b12700e64dce172a9ddf4abc1ae51d258",
+  "upstream_code_copied": false,
+  "upstream_test_suites_executed": false,
+  "repositories": [
+    {
+      "repository": "aeyakovenko/percolator",
+      "commit": "37cb14ee1436eaf3b7d97e1901b0dc1bf38f5311",
+      "url": "https://github.com/aeyakovenko/percolator/tree/37cb14ee1436eaf3b7d97e1901b0dc1bf38f5311",
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "aeyakovenko/percolator-prog",
+      "commit": "5cb331dde354517c6371a8acf92cecb194f3bb73",
+      "url": "https://github.com/aeyakovenko/percolator-prog/tree/5cb331dde354517c6371a8acf92cecb194f3bb73",
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "aeyakovenko/percolator-cli",
+      "commit": "7f9004768e5f6cbc4fb8c08fc1e5a8751669d990",
+      "url": "https://github.com/aeyakovenko/percolator-cli/tree/7f9004768e5f6cbc4fb8c08fc1e5a8751669d990",
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "aeyakovenko/percolator-match",
+      "commit": "60aac3a996d0264c47fbefe9a2625d6ee6fb6a47",
+      "url": "https://github.com/aeyakovenko/percolator-match/tree/60aac3a996d0264c47fbefe9a2625d6ee6fb6a47",
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "aeyakovenko/percolator-meta",
+      "commit": "d1a147cc36d3302fc2115d77a8adae7b4fa87241",
+      "url": "https://github.com/aeyakovenko/percolator-meta/tree/d1a147cc36d3302fc2115d77a8adae7b4fa87241",
+      "license": "Apache-2.0"
+    },
+    {
+      "repository": "aeyakovenko/percolator-stress-test",
+      "commit": "9aaca144dae7d826ee9fbe6699eecb9955a1290c",
+      "url": "https://github.com/aeyakovenko/percolator-stress-test/tree/9aaca144dae7d826ee9fbe6699eecb9955a1290c",
+      "license": "Apache-2.0"
+    }
+  ]
+}

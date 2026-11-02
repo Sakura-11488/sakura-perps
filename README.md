@@ -2,16 +2,74 @@
 
 > ### ⚠️ Devnet only. Unaudited. Not for real funds.
 >
-> This program has not been audited, has never held anything of value, and is
+> This program has not been audited, is not approved for real funds, and is
 > incomplete. Do not deploy it to mainnet. Do not send it money.
 
 Permissionless oracle-and-pool perpetual futures on Solana.
 
-**Status:** milestone 5 of 10 — markets and positions are live on devnet
-(`devnet-v0.6.0`). Traders can open and close leveraged positions against the
-pool. Funding, borrow fees, liquidation and the keeper are **not built**; there
-is no keeper liquidation at all, so exits currently depend on the position owner
-or the admin. See [What milestone 5 does not settle](#what-milestone-5-does-not-settle).
+**Source reviewed 2026-11-02:** a devnet protocol prototype with implemented
+trading and liquidation paths, still incomplete and unaudited.
+The latest recorded deployment is `devnet-v0.7.0` (2026-08-26).
+A read-only check on 2026-10-29 confirmed that the devnet program exists and is
+executable; it did not re-verify its bytecode or run a trade.
+
+**Security researchers:** start with the [local security challenge](docs/security-challenge.md).
+It includes wallet-free paper tests, a compiled-program simulator, exact build
+manifests, known limitations and reporting requirements. Public launch is pending
+a verified private reporting channel and an assigned responder. There is no
+funded bounty. The shared devnet deployment is not this challenge's target.
+
+| Area | Implemented | Remaining work |
+|---|---|---|
+| Trading | Collateral pools, isolated leveraged positions, owner/admin/emergency closes | Economic hardening and broader operating evidence |
+| Funding and borrow | Historical pool utilization and full-interval migrated accrual, with funding remainder carry | Legacy-book drain, funding-farm mitigation and economic review |
+| Liquidation | Permissionless on-chain liquidation; exercised on devnet on 2026-08-30 | Insurance and bad-debt recovery; debt is currently recorded |
+| Keeper | Off-chain simulation, bounded oracle responses, durable submission and spending reservations | Working price-feed access, a proven pinned-feed refresh, and sustained operation |
+| LP accounting | Share mint/burn; new source blocks deposits/redemptions while the pool has open claims | Liability-aware valuation and bounded LP exit; the temporary guard can lock LPs indefinitely |
+| Administration | Admin-gated feed qualification and risk controls; two-step rotation implemented in source | Deploy and rehearse rotation; multisig/timelock governance and audit |
+| Dashboard | Read-only devnet monitor with bounded API errors and explicit unknown observations | Operational validation; reference oracle checks are not live-market acceptance |
+| App integration | IDL, generated types and keeper clients | Reusable SDK and integration with this protocol; Sakura's current app uses Phoenix |
+
+The default Hermes endpoint returned `401 Unauthorized` again during the
+2026-10-29 read-only check. A configured endpoint may resolve access, but the
+keeper's ability to refresh the pinned feed still needs to be demonstrated.
+See [keeper status](keeper/README.md) and [next milestone](#next-milestone).
+Neither the deployed program nor a passing build proves a continuously running
+keeper or production readiness.
+
+**Current focus: security.** The first hardening batch adds durable keeper
+submissions and spending reservations, fair scan coverage, truthful dashboard
+status, and two-step admin rotation. These source changes have not been deployed.
+See [security controls, operating notes and remaining gates](docs/security-hardening.md).
+The next source batch adds historical borrow accounting, funding carry,
+strict recovery-price provenance and bounded Hermes parsing. It also remains
+undeployed. Legacy pools must drain before accepting risk under the new engine.
+
+**Product direction:** crypto-native communities, teams, strategy and social
+play. A new [Risk Rooms paper prototype](crates/rooms/README.md) makes the proposed
+budget and backing rules executable: each member has owner-controlled limits,
+delegates have restricted authority, and each position names its separately
+funded backing cell. It is a finite capped-contract simulator, not a deployed
+perpetual market or a complete app. See the
+[market research, security evidence and prioritized build plan](docs/research/2026-10-30-perps-direction.md).
+
+**Percolator research and implementation, 2026-11-02:** reviewed all six
+`aeyakovenko/percolator*` repositories at pinned commits. Their current branches
+do not constitute one compatible release. Sakura adopts intent binding and
+separation of funded obligations without importing the engine. New source binds
+opens to a risk-policy revision and slot deadline, and closes to a unique
+position generation. The [research report](docs/research/2026-11-02-percolator-and-risk-rooms.md)
+records source evidence, the LP attack traces, rejected approaches and release
+gates. These changes are **undeployed** and do not establish novelty or security
+certification. Open/close instruction arguments changed; regenerate clients
+against the accompanying IDL before any coordinated devnet upgrade.
+
+Run the paper community scenario without a wallet or RPC:
+
+```bash
+cargo run -p sakura-perps-rooms --example community_season --locked
+cargo test -p sakura-perps-rooms --locked
+```
 
 ---
 
@@ -26,11 +84,11 @@ Market listing is **permissionless**: anyone may create a market for an asset
 whose price feed has been qualified. A newly created market opens *quarantined*,
 with zero open-interest allowance, until its risk parameters are set.
 
-That split is deliberate and it is the core safety idea here. Permissionless
-*listing* is safe. Permissionless *feed qualification* is not — on some oracle
-networks anyone can create a feed backed by arbitrary jobs, so "any feed with low
-variance" would be equivalent to no gate at all. The oracle allowlist is
-admin-controlled; everything downstream of it is open.
+Permissionless market creation does not authorize trading. Feed qualification
+and risk limits remain security decisions: low variance alone does not establish
+that a feed is trustworthy or its underlying market is deep enough. The oracle
+allowlist is admin-controlled, and new markets remain quarantined until their
+risk parameters are set.
 
 ## What this is not
 
@@ -55,10 +113,9 @@ measurable reasons:
    is also smaller than a single meaningful position, so liquidations could not
    clear at any price.
 
-SAKURA instead earns fee discounts for holders and boosted yield for liquidity
-providers who stake it — roles that require no price feed at all. This is the
-same split GMX uses between GMX and GLP: the volatile token is never what backs
-the book.
+Fee discounts for SAKURA holders and boosted LP yield for stakers are proposed
+roles for the token, not implemented features of this program. SAKURA is not the
+collateral backing positions.
 
 Every cluster-varying address — the collateral mint, its token program, the fee
 recipient — is stored in an account, never a compile-time constant.
@@ -76,18 +133,18 @@ Versions must match. If yours differ, expect failure.
 | SBF platform-tools | v1.54 (bundled with Agave 4.1.2) |
 | Node | 22 |
 
-These versions are not arbitrary — they are the only combination that works, and
-finding it cost real time:
+These are the repository's supported versions. Other combinations need their
+own compatibility checks:
 
 - Anchor 1.1.2 requires Rust **1.89**, via its `wincode` dependency.
 - Several crates in `anchor-spl`'s transitive tree now require **edition 2024**,
   which Rust stabilised in 1.85. Older platform-tools ship Rust 1.84 and die with
   ``feature `edition2024` is required`` before compiling a line of your code.
-- Agave 4.1.2 bundles platform-tools **v1.54**, whose Rust is 1.89. Older Agave
-  bundles v1.51 and does not work with current Anchor.
-- Installing v1.54 *alongside* an older Agave does not help: `anchor build` does
-  not reach for it, and passing `--tools-version` through `anchor build --` is
-  rejected by the IDL builder *after* the program has already compiled.
+- Agave 4.1.2 defaults to platform-tools **v1.54**, whose Rust is 1.89. The
+  Anchor 1.1.2 prebuilt CLI was observed selecting v1.52 instead, so CI now
+  explicitly selects v1.54 with `cargo-build-sbf` and builds the IDL separately.
+- Do not forward `--tools-version` through `anchor build --`: it can also reach
+  the host IDL compiler, which does not accept the SBF-specific flag.
 
 The Anchor CLI version **must equal** `anchor-lang`. If they drift, account
 discriminators and the generated IDL diverge from what the deployed program
@@ -146,8 +203,10 @@ a standalone Rust alongside rustup.
 git clone https://github.com/Sakura-11488/sakura-perps.git
 cd sakura-perps
 pnpm install
-anchor build
-anchor test
+cargo-build-sbf --manifest-path programs/sakura-perps/Cargo.toml --tools-version v1.54
+mkdir -p target/idl target/types
+anchor idl build --out target/idl/sakura_perps.json --out-ts target/types/sakura_perps.ts
+SAKURA_PERPS_SO="$PWD/target/deploy/sakura_perps.so" cargo test -p sakura-perps-svm-tests --locked
 ```
 
 ## Devnet
@@ -324,9 +383,10 @@ if that file is lost.
 The rejections are the point. A guard that only ever passes is indistinguishable
 from no guard at all.
 
-The deployed binary is the artifact CI produced, not a local build. `solana
-program dump` returns bytes whose sha256 matches the CI artifact exactly, so the
-source in this repository provably corresponds to the bytecode on chain.
+At the recorded deployment verification, the dumped on-chain binary matched the
+CI artifact's sha256. That ties the deployed bytes to the source commit named in
+the deployment record; it does not establish byte-for-byte identity with every
+later commit or replace a fresh check of the current deployment.
 
 ProgramData lives at `Cy3X6ZFgt1ELXh4Qnp9NcNrUKRT7U4vQrWq5SFVAdREw`.
 
@@ -357,12 +417,24 @@ solana program close --buffers --url "$RPC"
 
 ## Testing
 
-| Layer | Tool | Runs |
-|---|---|---|
-| Pure math | `cargo test` + `proptest` | every push |
-| Program logic | LiteSVM | every push |
-| End-to-end | `anchor test` | PRs and nightly |
-| Adversarial | `trident`, `cargo-fuzz` | nightly |
+The [CI workflow](.github/workflows/ci.yml) runs on pushes to `main`, pull
+requests targeting `main`, and manual dispatch:
+
+| Check | Implementation |
+|---|---|
+| Risk math and properties | `cargo test -p sakura-perps-risk --locked`, including `proptest` |
+| Program host tests | `cargo test -p sakura-perps --lib --locked` |
+| Program build | `anchor build`; program ID check and artifact checksum |
+| SVM integration | LiteSVM against the compiled artifact from the build job |
+| Static checks | rustfmt, clippy, secret scanning and source guardrails |
+| Keeper/client checks | TypeScript checking and offline security regressions |
+| Dashboard checks | Offline security regressions and a production build |
+
+The recorded CI run for commit `07ce580e` passed on 2026-09-05:
+[run 33936923053](https://github.com/Sakura-11488/sakura-perps/actions/runs/33936923053).
+This is recorded CI evidence, not a new test run on the review date.
+There is no nightly schedule, `anchor test` job, Trident job or cargo-fuzz job
+in the current workflow. Adversarial fuzzing remains roadmap work.
 
 LiteSVM matters more than it might appear: it allows writing account data
 directly, which is how oracle staleness, wide confidence intervals, and
@@ -395,7 +467,8 @@ Eleven entry points **added by M5**, bringing the program to 20 in total:
 
 ### The spec, and why it is written the way it is
 
-[`docs/m5-spec.md`](docs/m5-spec.md) is authoritative and carries provenance tags
+[`docs/m5-spec.md`](docs/m5-spec.md) is the historical M5 design specification.
+Later implementation supersedes its status statements. It carries provenance tags
 per section — `[RETAINED]`, `[RECONSTRUCTED]`, `[REVISED]`, `[REVISED ×2]`. The
 original was lost with a cleaned scratchpad before it was ever committed; what is
 there now is a reconstruction that has since been through three adversarial
@@ -415,10 +488,11 @@ unclosable, in a milestone that ships no keeper liquidation. The ledger books
 **No exit that survives a dead feed.** All three close paths originally needed a
 passing oracle read, so a feed that stopped publishing — a delisting, an outage,
 or precisely the revocation the design exists for — trapped every position and
-pinned LP capital behind the utilisation ceiling. `emergency_close_position` now
-takes no price account, no pause gate, and settles from `last_good_price`, which
-a *permissionless* `refresh_market_price` advances so an admin cannot freeze the
-reference by pausing everything else.
+pinned LP capital behind the utilisation ceiling. The original recovery path
+introduced `last_good_price` and a permissionless refresh. The 2026-11-02 source
+now requires a proven strict raw observation and freezes it during quarantine;
+missing legacy provenance fails closed. Historical pricing and permanent-outage
+recovery remain economic policy gates.
 
 **A liquidation fee that could underflow the transfer.** `apply_liquidation_fee`
 clamps twice: against collateral, then against what the close fee left of the
@@ -429,7 +503,7 @@ program ownership and the seeds you write — nothing else. Every other binding 
 an implementer's invention. `has_one = market`, the vault seeds, and the token
 mint and owner pins are now explicit.
 
-### LP share pricing ships as a bound, not a fix
+### LP flows require a settled pool
 
 Shares price off `pool.quote_deposited`, which ignores what open positions are
 owed. The obvious fix — an aggregate mark — was designed, reviewed, and
@@ -439,25 +513,35 @@ summation. Two longs at +100 and −100 net to zero aggregate PnL while the pool
 genuinely owes the winner 100, so a balanced two-sided book — the normal state of
 a perp DEX — marks to a liability of zero.
 
-No aggregate over `(Σ size, Σ entry_notional)` can compute it, and pricing off
-`reserved_quote` instead is worse than the bug in both directions. So M5 ships
-the bound: `M5_MAX_UTILIZATION_BPS = 2_000` caps reserved at 20% of AUM, which is
-a provable ceiling on how far a share price can be overstated. `risk::pool::aum_usd`
-stays uncalled and undeleted; §4.4 of the spec names what M6 must build to call it.
+No aggregate over `(Σ size, Σ entry_notional)` can compute it. The 20% reserve
+ceiling limits reserved trader profits; it does not bound valuation error from
+unsettled trader losses. The prior claim that it bounded all LP mispricing was
+too broad. A withdrawal delay also does not remove the transfer of value.
+
+The 2026-11-02 source therefore rejects LP minting and redemption whenever
+`locked_quote != 0` or `reserved_quote != 0`. Requests, cancellations and trader
+settlement remain available, and LP flows resume when the book is flat. This
+contains the demonstrated entry/exit pricing paths but can block LPs indefinitely
+if positions remain open. It is not a production exit design. Liability-aware
+valuation, settlement cadence and executable exit guarantees remain release gates.
 
 ### Account layouts are size-locked
 
 Every stage-3 field came out of `_reserved` rather than off the end — `Market`
 128→96, `Position` 64→62, `Pool` 120→128 less the inert `min_liquidity_quote`.
-Six compile-time `INIT_SPACE` asserts hold it there, because growing a struct
+The new market revision/sequence counters reduce `Market::_reserved` from 96 to
+80 bytes, and the position generation reduces `Position::_reserved` from 62 to
+54. Legacy zeros remain valid, with legacy positions using generation 0 and new
+ones starting at 1. Six compile-time `INIT_SPACE` asserts hold the lengths, because growing a struct
 orphans every live devnet account rather than migrating it.
 
 ### Compute budget, measured
 
 §9.11 asked for this "before the instruction set is frozen" and stage 3 shipped
-without it. Measured in LiteSVM against the same program bytes now running on
-devnet — `programs/` and `crates/risk` are unchanged between the deployed
-commit `c058f40` and the measurement:
+without it. These historical LiteSVM measurements used the `devnet-v0.6.0`
+program bytes: `programs/` and `crates/risk` were unchanged between deployed
+commit `c058f40` and the measurement. They do not measure every instruction in
+the later `devnet-v0.7.0` deployment:
 
 | Instruction | CU | of the 200,000 default |
 |---|---:|---:|
@@ -467,22 +551,19 @@ commit `c058f40` and the measurement:
 | `refresh_market_price` | 9,330 | 4% |
 | `settle_market` | 8,372 | 4% |
 
-Everything fits the default per-instruction budget with roughly 5x headroom, so
-no caller needs a `ComputeBudget` request. `close_position` was the one §9.11
-named as the risk — an oracle read, funding and borrow settlement, fee maths and
-a token-transfer CPI in one instruction — and it lands mid-table.
-
-`the_position_lifecycle_fits_the_default_compute_budget` **asserts** the 200,000
-bound rather than printing and moving on, so this cannot regress quietly once M6
-and M7 add funding, borrow fees and liquidation to these same paths. The exact
-digits are fixture-specific — one position, one market, one price path. The
-margin is not.
+The listed fixtures fit within 200,000 compute units.
+`the_position_lifecycle_fits_the_default_compute_budget` asserts that bound for
+these paths, including close settlement with funding and borrow.
+The figures are fixture-specific; permissionless liquidation and transactions
+bundling oracle updates require their own measurements and compute budget.
 
 ### What milestone 5 does not settle
 
-Deploying closes none of the spec's section 9. Ten items were open; §9.11 is now
-answered, leaving nine. (§9.8 is a record of how refuter disagreements were
-adjudicated, not an open item.)
+Section 9 of the spec records design concerns and historical gaps. Later work
+closed permissionless liquidation and the measured lifecycle compute-budget
+question, and added executable regression coverage. Read the original findings
+with the updated status below. (§9.8 records how review disagreements were
+adjudicated; it is not an open item.)
 
 | | Item | State |
 |---|---|---|
@@ -492,13 +573,15 @@ adjudicated, not an open item.)
 | 9.3 | the reserve grief is priced, not eliminated | open |
 | 9.4 | no keeper liquidation, load-bearing in two places | **closed** — `liquidate_position` |
 | 9.5 | the staleness option is charged, but not proportionally to age | open |
-| 9.6 | the admin is unrotatable | open |
+| 9.6 | the admin is unrotatable | implemented in source; deployment and operational rehearsal pending |
 | 9.7 | emergency close moves value at a price nobody chose | open |
 | 9.9 | parts still tagged `[RECONSTRUCTED]`, therefore unreviewed | open |
-| 9.10 | no test plan | open |
+| 9.10 | regression coverage and test plan | requested regressions now have executable tests; broader adversarial coverage remains |
 
-**9.6 is now the one to read before anyone puts real money near this.** The admin
-key cannot be rotated. Devnet is the right place for this until that is addressed.
+The recorded devnet release still lacks rotation. The new source implements a
+two-step nomination/acceptance handshake, with cancellation and replacement.
+It requires an upgrade and rehearsal; it does not rotate the program upgrade
+authority or recover a lost admin key. See [the procedure](docs/security-hardening.md#admin-transfer-procedure).
 
 ### Permissionless liquidation — closing 9.4
 
@@ -522,41 +605,30 @@ afterwards would credit liabilities the vault no longer backs and break I1.
 `keeper_fee_share_bps` came out of `Exchange::_reserved` (96 → 94), so
 `INIT_SPACE` stays 304 and the live exchange needed no reallocation — it read
 **0** from its pre-existing reserve bytes, which is why liquidation became
-permissionless the moment v0.7.0 landed while keepers earned nothing. It is now
-set to **2000 (20%)** on devnet via `set_keeper_fee_share`. Capped at
-`MAX_KEEPER_FEE_SHARE_BPS` (50%).
+permissionless the moment v0.7.0 landed while keepers earned nothing. The last
+recorded devnet configuration is **2000 (20%)**, set via `set_keeper_fee_share`.
+The on-chain cap is `MAX_KEEPER_FEE_SHARE_BPS` (50%); read the exchange account
+before relying on a current payout rate.
 
-Eight tests cover it, including the two that pin the design rather than the
-happy path: at a zero share `liquidate_position` settles byte-for-byte like
-`admin_settle_position` across every payout field and the whole pool ledger —
-the only configuration the deployed exchange is in — and at a non-zero share the
-trader's payout is unchanged while the pool books exactly the keeper's share less.
+Tests cover zero-share equivalence with `admin_settle_position` across every
+payout field and the pool ledger. At a non-zero share, the trader's payout is
+unchanged while the pool books exactly the keeper's share less. The zero-share
+case is a regression fixture, not a claim about the current devnet configuration.
 
-### Proven on chain, 2026-08-30 — and it exposed two things
+### Permissionless liquidation, exercised on devnet on 2026-08-30
 
-The first permissionless liquidation settled from `DT8fc3LE…3QfY`, a wallet with
-no relationship to the position. Mechanically everything worked: the gate, the
-account constraints, the ledger, the bad-debt record. Economically it did not.
-
-**Accrual is crank-driven, not wall-clock.** `accrue` runs only when an
-instruction touches the market. The position sat open for three days with
-`cum_borrow_index` frozen at its opening 25,112 and `cum_funding_index` at 0 —
-perfectly solvent, because nothing had settled it. One `settle_market` then
-applied the whole backlog at once:
+The first recorded permissionless liquidation settled from `DT8fc3LE…3QfY`,
+a wallet unrelated to the position. The gate, account constraints, ledger and
+bad-debt record worked. The position had been unattended for three days, and a
+manual `settle_market` immediately before liquidation advanced its stored indices:
 
 | | before | after |
 |---|---:|---:|
 | `cum_borrow_index` | 25,112 | 61,999,175 |
 | `cum_funding_index` | 0 | 239,930,555 |
 
-This is the load-bearing operational fact about the design and it is documented
-nowhere else: **without something keeping the market settled, a position never
-becomes liquidatable however long it sits.** Time alone does nothing.
-
-**And the fee clamp is the default case, not an edge case.** Because the debt
-landed in one step, the position went from solvent, past the liquidation band,
-into bad debt without ever pausing in the window where a fee was payable. The
-`PositionClosed` event:
+By the time it was liquidated, the position was deeply underwater.
+The `PositionClosed` event reported:
 
     gross_payout_quote     0
     close_fee_quote        0
@@ -564,83 +636,102 @@ into bad debt without ever pausing in the window where a fee was payable. The
     net_payout_quote       0
     bad_debt_usd           1,690,280
 
-The keeper paid gas and **earned nothing**. The trader received nothing. The pool
-absorbed the collateral (`quote_deposited` 8,000,000 → 9,294,495) and booked
-$1.69 of bad debt against `cum_bad_debt_usd`.
+The keeper paid gas and earned nothing. The trader received nothing. The pool
+absorbed the collateral (`quote_deposited` 8,000,000 → 9,294,495) and recorded
+$1.69 of bad debt in `cum_bad_debt_usd`. Recording that debt does not provide an
+insurance or recovery mechanism.
 
-#### Correction, 2026-09-01 — the conclusion drawn above was wrong
+#### Polling keepers can earn fees without a separate settlement crank
 
-This section originally concluded that a missing crank *destroys* the
-liquidation incentive, and that "any keeper for this venue must crank
-`settle_market`, not just observe". **That is false, and the reasoning behind it
-was a misreading of the code.**
+An earlier interpretation of that run incorrectly claimed an uncranked market
+could not be liquidated. This was corrected on 2026-09-01:
+`handle_liquidate_position` calls `accrue` before checking solvency, so both
+simulation and liquidation evaluate the position against the current cluster
+clock even when its stored indices have not moved.
 
-`handle_liquidate_position` calls `accrue` at step 2, *before* the solvency gate
-— "accrue before judging solvency, or the gate reads an equity that ignores
-money the position already owes". A stale stored index therefore protects
-nobody: the liquidation accrues and judges inside the same transaction, against
-the current cluster clock. A keeper that only polls sees the position cross the
-boundary on its next tick and collects the ordinary fee.
+The regression `a_stale_market_index_does_not_stop_a_keeper_being_paid`
+advances six hours with no market interaction, asserts the stored borrow index
+is unchanged, then liquidates with a non-zero fee paid to the keeper and verifies
+that accrual advanced the index.
 
-Proven, not argued, by
-`a_stale_market_index_does_not_stop_a_keeper_being_paid`: six hours pass with
-nothing touching the market, the stored `cum_borrow_index` is asserted unchanged,
-and the liquidation then succeeds with a **non-zero** fee that the keeper is
-actually paid — after which the index has moved, because the liquidation is what
-moved it.
+A polling keeper can therefore earn a fee when it acts while sufficient payout
+remains. This is not a guarantee of profitability: the fee clamps to zero on
+sufficiently underwater positions, as the unattended devnet position demonstrated.
+The run proves permissionless liquidation, not sustained automated operation.
 
-What produced the wrong claim was the doc comment on `accrue`, which read "one
-implementation, five callers" and did not list `liquidate_position`. I added that
-call myself and never updated the list. Both are now fixed.
+#### Historical settlement truncation and the source correction
 
-So why did the devnet liquidation pay zero? Because nothing was watching for
-three days, and the market was then manually settled immediately before being
-liquidated — applying the backlog in one step and carrying the position past the
-fee-payable window before anyone looked. That is what an unattended book looks
-like, not a property that dooms polling keepers.
-
-#### The crank does matter, for the opposite reason
-
-`accrue` clamps its interval: `dt = min(elapsed, max_settle_window_seconds)`,
+The older implementation clamps its interval: `dt = min(elapsed, max_settle_window_seconds)`,
 while `last_settle_ts` still advances to *now*. Elapsed time beyond one window is
-therefore **never charged** — not deferred, forgiven. `settle_market`'s own test
-asserts exactly this: "only the settle window may be charged, never the whole
-gap".
+therefore **never charged** — not deferred, forgiven.
 
 An uncranked market silently under-charges borrow interest, and that shortfall is
 the LPs'. A market with a one-hour window left alone for a day collects one hour
-of interest and writes off twenty-three. This is a pool-revenue argument, and it
-has nothing to do with keeper fees — which is the reverse of what was written
-here before.
+of interest and writes off twenty-three. A settlement cadence protects pool
+revenue; it is not a prerequisite for a polling keeper to earn a liquidation fee.
+The current keeper does not run a settlement crank. In the 2026-11-02 source,
+migrated books instead accrue the full elapsed interval against historical
+utilization, with fractional funding carry. Only the drain-only legacy path
+retains the old truncation. Fresh SVM regressions cover the new behavior.
 
-**Other known limits, pre-mainnet rather than devnet blockers.** A keeper can
-stamp `market.last_good_price` from a price that passed only the looser
-liquidation guards, and `emergency_close_position` settles off that field with no
-freshness gate. Nothing relates `maintenance_margin_bps` to
+**Other limits and source corrections.** Liquidation-grade updates could
+previously stamp `market.last_good_price`. The 2026-11-02 source removes those
+writes, records strict provenance and freezes the cache during quarantine.
+Emergency settlement still uses a historical snapshot with no freshness gate.
+Nothing relates `maintenance_margin_bps` to
 `liquidation_max_confidence_bps + spread_bps`, leaving a band where an owner's own
 `close_position` reverts while a keeper succeeds.
 
 ## Roadmap
 
-- [x] **1** — repo, CI, first devnet deploy
-- [x] **2** — risk core: fixed-point `i128`, zero floats, property tests
-- [x] **3** — oracle adapter with staleness and confidence rejection
-- [x] **4** — collateral vault
-- [x] **5** — positions: open, close, isolated margin — *deployed `devnet-v0.6.0`*
-- [ ] **6** — funding and borrow fees
-- [ ] **7** — liquidation, insurance fund, bad-debt path
-- [~] **8** — liquidation keeper — *on-chain half shipped (`liquidate_position`); no off-chain bot*
-- [ ] **9** — TypeScript SDK and app integration
-- [ ] **10** — hardening, fuzzing, reproducible builds, audit prep
+Milestones describe implementation and remaining work, not a completion percentage.
 
-Phases 2, 5 and 7 are the bulk of the work. Realistically this is months, not
-weeks, and an audit adds months more on top.
+| Milestone | State | Remaining work |
+|---|---|---|
+| 1 — repo, CI, first devnet deploy | Implemented | Ongoing maintenance |
+| 2 — fixed-point risk core and property tests | Implemented | Broader adversarial validation |
+| 3 — oracle validation | Implemented | Keeper-controlled refresh still needs live proof |
+| 4 — collateral vault | Implemented; source restricts LP flows to a settled pool | Liability-aware valuation and bounded LP exits |
+| 5 — positions and isolated margin | Deployed in `devnet-v0.6.0` | Economic hardening |
+| 6 — funding and borrow fees | Historical utilization and full-interval accrual implemented in source | Legacy drain, funding-farm mitigation and economic review |
+| 7 — liquidation, insurance and bad debt | Partial: liquidation deployed in `devnet-v0.7.0`; bad debt recorded | Insurance/recovery and remaining economic risks |
+| 8 — liquidation keeper | Implemented for devnet; operation not fully demonstrated | Price-feed access, verified refresh, paid automated liquidation and operating history |
+| 9 — TypeScript SDK and app integration | Pending; IDL and internal clients exist | Reusable SDK and a Sakura integration with this program |
+| 10 — hardening and audit preparation | Source batches: admin rotation, keeper persistence/budgets/coverage, dashboard safeguards, bound trade intents and LP containment | Economic design, deployment rehearsal, dependency remediation, governance, fuzzing, reproducible-build validation and independent audit |
+
+The community Risk Rooms work is a separate paper experiment. It does not
+advance the live protocol's deployment, SDK or audit milestones by itself.
+
+Sakura's current Expo trading screen uses Phoenix. It is not an integration with
+this program; the interface does not establish completion of milestone 9.
+
+### Next milestone
+
+Complete the [security release gates](docs/security-hardening.md#remaining-release-gates),
+starting with LP liability valuation and emergency-price policy. In parallel,
+demonstrate a reliably operating devnet market:
+
+1. Configure accessible `HERMES_URL` / `HERMES_AUTH` values and run
+   `npm run keeper:preflight`.
+2. Run `npm run keeper:verify-push` in dry-run mode, then an explicitly enabled devnet
+   push. Verify that both `publish_time` and `posted_slot` advance.
+3. Exercise a controlled position lifecycle and automated liquidation, verifying
+   position closure, the keeper payout, and pool accounting.
+4. Verify historical accrual and observe the keeper through stale-feed,
+   healthy-position and failure scenarios.
+
+Before mainnet, deploy and rehearse admin rotation, resolve LP liability valuation,
+insurance/recovery and the remaining economic risks, then complete independent
+review and audit.
+No mainnet launch date is established.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md). No audit, no bug bounty yet. Reports are welcome
-at **security@sakuraonseeker.com** and we will not pursue anyone testing in good
-faith against devnet.
+See [SECURITY.md](SECURITY.md). No audit, no bug bounty yet. Private intake must be
+configured before inviting public reports; the previously listed mailbox was
+unverified. The current challenge and good-faith research terms cover your own
+local simulator or validator with simulated assets; they do not authorize attacks
+on shared services or the older devnet deployment.
 
 ## History
 
