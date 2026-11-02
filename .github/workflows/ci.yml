@@ -40,6 +40,7 @@ env:
   # fixes it at the source rather than working around it.
   SOLANA_VERSION: "4.1.2"
   ANCHOR_VERSION: "1.1.2"
+  SBF_TOOLS_VERSION: "v1.54"
 
 jobs:
   javascript:
@@ -136,6 +137,12 @@ jobs:
       - name: Test the risk crate
         run: cargo test -p sakura-perps-risk --locked
 
+      - name: Test community risk rooms (paper prototype)
+        run: cargo test -p sakura-perps-rooms --locked
+
+      - name: Run the adversarial community season example
+        run: cargo run -p sakura-perps-rooms --example community_season --locked
+
       # The program's own host-side tests. They were written to need no Solana
       # toolchain and no compiled `.so` precisely so they would be cheap to run,
       # and then were not wired to run — `cargo clippy --all-targets` compiles
@@ -193,16 +200,18 @@ jobs:
           cargo-build-sbf --version
 
       - name: Build
-        # From the workspace root. Building inside the program directory writes
-        # to programs/*/target/ and never produces an IDL, which is what made the
-        # old artifact upload path wrong and the TypeScript tests unrunnable.
-        #
-        # No --tools-version here. `anchor build --` forwards trailing arguments
-        # to the IDL build as well, which rejects the flag with "unexpected
-        # argument '--tools-version' found" after the program has already
-        # compiled successfully. The install step above leaves v1.54 as the
-        # active SBF toolchain, so the program picks it up regardless.
-        run: anchor build
+        # Pin the SBF compiler explicitly: Anchor 1.1.2 binaries can select
+        # v1.52 despite Agave's v1.54 default. Separate IDL generation also keeps
+        # SBF-only flags out of the host IDL compilation command.
+        run: |
+          cargo-build-sbf --manifest-path programs/sakura-perps/Cargo.toml --tools-version "$SBF_TOOLS_VERSION"
+          mkdir -p target/idl target/types
+          anchor idl build --out target/idl/sakura_perps.json --out-ts target/types/sakura_perps.ts
+
+      - name: Verify committed client ABI matches this source
+        run: |
+          diff -u idl/sakura_perps.json target/idl/sakura_perps.json
+          diff -u idl/sakura_perps.ts target/types/sakura_perps.ts
 
       - name: Verify program id matches declare_id!
         # A mismatch between Anchor.toml and declare_id! surfaces at runtime as

@@ -3590,6 +3590,26 @@ export type SakuraPerps = {
       "code": 6072,
       "name": "notPendingAdmin",
       "msg": "Only the nominated admin may accept the transfer."
+    },
+    {
+      "code": 6073,
+      "name": "lpValuationUnavailable",
+      "msg": "LP deposits and redemptions require a flat pool until liability-aware valuation is implemented."
+    },
+    {
+      "code": 6074,
+      "name": "marketRiskRevisionMismatch",
+      "msg": "Market risk policy changed after this open intent was prepared."
+    },
+    {
+      "code": 6075,
+      "name": "intentExpired",
+      "msg": "Open intent requires a nonzero deadline that has not passed."
+    },
+    {
+      "code": 6076,
+      "name": "positionGenerationMismatch",
+      "msg": "Close intent does not refer to this position generation."
     }
   ],
   "types": [
@@ -3674,6 +3694,14 @@ export type SakuraPerps = {
               "[`OpenPositionParams::limit_price`]."
             ],
             "type": "u128"
+          },
+          {
+            "name": "expectedPositionId",
+            "docs": [
+              "Exact position generation accepted by this signature, read from the",
+              "position account. A replacement at the same PDA has a different ID."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -4385,19 +4413,34 @@ export type SakuraPerps = {
             "type": "i64"
           },
           {
+            "name": "riskRevision",
+            "docs": [
+              "Monotonic revision of the entry risk parameters. An opening signature",
+              "binds this value so a later retune cannot silently change its fees, cap,",
+              "margin requirements, or the terms it snapshots for closing."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "nextPositionId",
+            "docs": [
+              "Last allocated position ID. Every successful open increments it, even",
+              "when reusing a closed owner/market PDA in the same slot. Markets have no",
+              "close/reinitialize instruction, so an owner cannot reset this sequence."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "reserved",
             "docs": [
-              "128 originally. `quarantined_ts`, `last_good_price` and",
-              "`last_good_price_ts` were taken from here rather than appended, so the",
-              "account's length is unchanged and no existing instance needs",
-              "reallocating. A market written before those fields existed reads zero for",
-              "all three, which is the \"never quarantined, never priced\" case both the",
-              "wind-down delay and `emergency_reference_price` already handle."
+              "128 originally. Recovery fields and the two intent counters consume",
+              "reserved bytes without changing the account length. Older accounts read",
+              "zero for the counters; their first new position receives ID 1."
             ],
             "type": {
               "array": [
                 "u8",
-                96
+                80
               ]
             }
           }
@@ -4539,6 +4582,21 @@ export type SakuraPerps = {
               "\"unset\" means and only an explicit rejection settles it."
             ],
             "type": "u128"
+          },
+          {
+            "name": "expectedRiskRevision",
+            "docs": [
+              "Exact entry policy accepted by this signature. Read from the market",
+              "when quoting; any subsequent successful retune invalidates the intent."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "validUntilSlot",
+            "docs": [
+              "Last slot in which the intent may execute, inclusive. Zero is invalid."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -4677,7 +4735,8 @@ export type SakuraPerps = {
           {
             "name": "quoteDeposited",
             "docs": [
-              "Liquidity providers' equity. **This is AUM.** Never `quote_vault.amount`."
+              "Tracked LP equity. It prices shares only with no open trader claims;",
+              "otherwise it is not marked NAV. Never derived from `quote_vault.amount`."
             ],
             "type": "u64"
           },
@@ -4935,11 +4994,21 @@ export type SakuraPerps = {
             "type": "u16"
           },
           {
+            "name": "positionId",
+            "docs": [
+              "Market-wide generation allocated at open. The PDA can be reused, but",
+              "this ID cannot: an old signed close must not retire its replacement.",
+              "Taken from reserved bytes; legacy live positions read ID 0 and remain",
+              "closeable by explicitly signing that ID."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "reserved",
             "type": {
               "array": [
                 "u8",
-                62
+                54
               ]
             }
           }

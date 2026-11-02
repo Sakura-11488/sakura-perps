@@ -1048,4 +1048,14 @@ pub enum PerpsError {
     NoPendingAdmin,
     #[msg("Only the nominated admin may accept the transfer.")]
     NotPendingAdmin,
+
+    // Append-only: preserve every previously deployed error number.
+    #[msg("LP deposits and redemptions require a flat pool until liability-aware valuation is implemented.")]
+    LpValuationUnavailable,
+    #[msg("Market risk policy changed after this open intent was prepared.")]
+    MarketRiskRevisionMismatch,
+    #[msg("Open intent requires a nonzero deadline that has not passed.")]
+    IntentExpired,
+    #[msg("Close intent does not refer to this position generation.")]
+    PositionGenerationMismatch,
 }

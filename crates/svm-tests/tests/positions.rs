@@ -316,6 +316,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(risk: RiskParams) -> Self {
+        Self::with_liquidity(risk, LP_LIQUIDITY)
+    }
+
+    fn with_liquidity(risk: RiskParams, liquidity: u64) -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program(sakura_perps::ID, &program_binary())
             .expect("program loads");
@@ -386,7 +390,7 @@ impl Fixture {
                 .owner(&fixture.lp.pubkey())
                 .send()
                 .expect("lp share account");
-        fixture.lp_deposit(LP_LIQUIDITY);
+        fixture.lp_deposit(liquidity);
 
         // $100.00 to start. Every price below is expressed in whole cents.
         fixture.write_price(fixture.price_update, FEED_ID, 10_000);
@@ -536,17 +540,34 @@ impl Fixture {
     }
 
     fn lp_deposit(&mut self, amount: u64) {
-        let instruction = Instruction {
+        let instruction = self.lp_deposit_ix_for(
+            self.lp.pubkey(),
+            self.lp_token_account,
+            self.lp_share_account,
+            amount,
+        );
+        let lp = self.lp.insecure_clone();
+        self.send(instruction, &[&lp]).expect("lp deposit");
+    }
+
+    fn lp_deposit_ix_for(
+        &self,
+        depositor: Address,
+        depositor_token_account: Address,
+        depositor_share_account: Address,
+        amount: u64,
+    ) -> Instruction {
+        Instruction {
             program_id: sakura_perps::ID,
             accounts: sakura_perps::accounts::LpDeposit {
-                depositor: self.lp.pubkey(),
+                depositor,
                 exchange: self.exchange,
                 pool: self.pool,
                 collateral_mint: self.collateral_mint,
                 quote_vault: self.quote_vault,
                 share_mint: self.share_mint,
-                depositor_token_account: self.lp_token_account,
-                depositor_share_account: self.lp_share_account,
+                depositor_token_account,
+                depositor_share_account,
                 pool_share_account: self.pool_share_account,
                 token_program: spl_token_id(),
             }
@@ -556,9 +577,72 @@ impl Fixture {
                 min_shares_out: 1,
             }
             .data(),
+        }
+    }
+
+    fn request_lp_withdraw(&mut self, shares: u64) -> Result<(), TransactionError> {
+        let owner = self.lp.pubkey();
+        let instruction = Instruction {
+            program_id: sakura_perps::ID,
+            accounts: sakura_perps::accounts::RequestWithdraw {
+                owner,
+                pool: self.pool,
+                share_mint: self.share_mint,
+                owner_share_account: self.lp_share_account,
+                withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
+                escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
+                token_program: spl_token_id(),
+                system_program: anchor_lang::system_program::ID,
+                rent: rent_sysvar_id(),
+            }
+            .to_account_metas(None),
+            data: sakura_perps::instruction::RequestWithdraw { shares }.data(),
         };
         let lp = self.lp.insecure_clone();
-        self.send(instruction, &[&lp]).expect("lp deposit");
+        self.send(instruction, &[&lp])
+    }
+
+    fn lp_withdraw(&mut self) -> Result<(), TransactionError> {
+        let owner = self.lp.pubkey();
+        let instruction = Instruction {
+            program_id: sakura_perps::ID,
+            accounts: sakura_perps::accounts::LpWithdraw {
+                owner,
+                exchange: self.exchange,
+                pool: self.pool,
+                collateral_mint: self.collateral_mint,
+                quote_vault: self.quote_vault,
+                share_mint: self.share_mint,
+                withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
+                escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
+                owner_token_account: self.lp_token_account,
+                token_program: spl_token_id(),
+            }
+            .to_account_metas(None),
+            data: sakura_perps::instruction::LpWithdraw { min_amount_out: 1 }.data(),
+        };
+        let lp = self.lp.insecure_clone();
+        self.send(instruction, &[&lp])
+    }
+
+    fn cancel_lp_withdraw(&mut self) -> Result<(), TransactionError> {
+        let owner = self.lp.pubkey();
+        let instruction = Instruction {
+            program_id: sakura_perps::ID,
+            accounts: sakura_perps::accounts::CancelWithdraw {
+                owner,
+                pool: self.pool,
+                share_mint: self.share_mint,
+                owner_share_account: self.lp_share_account,
+                withdraw_request: pda(&[b"withdraw_request", owner.as_ref()]),
+                escrow_share_account: pda(&[b"withdraw_escrow", owner.as_ref()]),
+                token_program: spl_token_id(),
+            }
+            .to_account_metas(None),
+            data: sakura_perps::instruction::CancelWithdraw {}.data(),
+        };
+        let lp = self.lp.insecure_clone();
+        self.send(instruction, &[&lp])
     }
 
     // ── markets ─────────────────────────────────────────────────────────────
@@ -822,6 +906,8 @@ impl Fixture {
                     size_base,
                     collateral_deposited_quote: collateral,
                     limit_price,
+                    expected_risk_revision: self.market_state().risk_revision,
+                    valid_until_slot: self.now_slot + 150,
                 },
             }
             .data(),
@@ -911,7 +997,10 @@ impl Fixture {
             }
             .to_account_metas(None),
             data: sakura_perps::instruction::ClosePosition {
-                params: ClosePositionParams { limit_price },
+                params: ClosePositionParams {
+                    limit_price,
+                    expected_position_id: self.position_state().position_id,
+                },
             }
             .data(),
         }
@@ -3091,17 +3180,379 @@ fn the_open_interest_cap_is_enforced() {
     );
 }
 
+fn lp_valuation_risk_params() -> RiskParams {
+    RiskParams {
+        max_profit_bps: 1_000,
+        spread_bps: 0,
+        open_fee_bps: 0,
+        // Strict fee dominance requires a positive round-trip fee even when
+        // funding is zero. Charge only at close to keep the entry ledger exact.
+        close_fee_bps: 1,
+        max_oracle_drift_bps: 0,
+        ..active_params()
+    }
+}
+
+fn snapshot_accounts(fixture: &Fixture, addresses: &[Address]) -> Vec<(Address, Account)> {
+    addresses
+        .iter()
+        .map(|address| {
+            (
+                *address,
+                fixture.svm.get_account(address).expect("account exists"),
+            )
+        })
+        .collect()
+}
+
+fn assert_accounts_unchanged(fixture: &Fixture, before: Vec<(Address, Account)>) {
+    for (address, account) in before {
+        assert_eq!(
+            fixture.svm.get_account(&address),
+            Some(account),
+            "rejected LP flow changed account {address}"
+        );
+    }
+}
+
+/// A 40% LP exit used to receive 400 from tracked equity of 1,000 even though
+/// a trader was already owed 100 of gross profit. The 100 / 600 reserve ratio
+/// passed the 20% ceiling. After the one-basis-point close fee and its 10%
+/// protocol share, the settled LP entitlement is 360.0396, not 400. Waiting out
+/// the withdrawal delay never corrected this valuation.
+#[test]
+fn lp_cannot_exit_ahead_of_an_open_winner_and_can_redeem_after_settlement() {
+    let mut fixture = Fixture::with_liquidity(lp_valuation_risk_params(), 1_000 * ONE);
+    fixture
+        .open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE)
+        .expect("open");
+    fixture
+        .request_lp_withdraw(400 * ONE)
+        .expect("request while a position is open");
+    fixture.advance(60, 150);
+    fixture.set_price(11_000);
+
+    let pool = fixture.pool_state();
+    assert_eq!(pool.quote_deposited, 1_000 * ONE);
+    assert_eq!(pool.locked_quote, 200 * ONE);
+    assert_eq!(pool.reserved_quote, 100 * ONE);
+    assert!(
+        100u128 * 10_000 <= 600u128 * u128::from(pool.max_utilization_bps),
+        "the old reserve gate would have allowed the overpriced exit"
+    );
+
+    let owner = fixture.lp.pubkey();
+    let request = pda(&[b"withdraw_request", owner.as_ref()]);
+    let escrow = pda(&[b"withdraw_escrow", owner.as_ref()]);
+    let before = snapshot_accounts(
+        &fixture,
+        &[
+            fixture.pool,
+            fixture.quote_vault,
+            fixture.share_mint,
+            fixture.lp_token_account,
+            fixture.lp_share_account,
+            fixture.market,
+            fixture.position_key(),
+            request,
+            escrow,
+        ],
+    );
+    expect_error(fixture.lp_withdraw(), PerpsError::LpValuationUnavailable);
+    assert_accounts_unchanged(&fixture, before);
+
+    let trader_before = fixture.token_balance(fixture.trader_token_account);
+    fixture
+        .close()
+        .expect("the LP gate must not block position settlement");
+    assert_eq!(
+        fixture.token_balance(fixture.trader_token_account) - trader_before,
+        299_890_000
+    );
+    assert_eq!(fixture.pool_state().quote_deposited, 900_099_000);
+    assert_eq!(fixture.pool_state().pending_protocol_fees, 11_000);
+    assert_eq!(fixture.pool_state().locked_quote, 0);
+    assert_eq!(fixture.pool_state().reserved_quote, 0);
+
+    let lp_before = fixture.token_balance(fixture.lp_token_account);
+    fixture
+        .lp_withdraw()
+        .expect("the existing matured request now redeems");
+    assert_eq!(
+        fixture.token_balance(fixture.lp_token_account) - lp_before,
+        360_039_600
+    );
+    assert_eq!(fixture.pool_state().quote_deposited, 540_059_400);
+    assert!(fixture
+        .svm
+        .get_account(&request)
+        .is_none_or(|account| account.data.is_empty()));
+    assert!(fixture
+        .svm
+        .get_account(&escrow)
+        .is_none_or(|account| account.data.is_empty()));
+    fixture.lp_deposit(100 * ONE);
+    assert_eq!(fixture.pool_state().quote_deposited, 640_059_400);
+    fixture.assert_i1("LP flows resume once the final claim settles");
+}
+
+/// At a 10% price loss, the existing LPs own 1,100.081 after settlement, including
+/// their share of the one-basis-point close fee. The old quote let a newcomer
+/// buy half the pool for 1,000 just before that loss was realized, then redeem
+/// for 1,050.0405. The new gate rejects the entry without transferring tokens;
+/// after settlement the same deposit buys 909.023971 shares at the settled price.
+#[test]
+fn lp_cannot_join_ahead_of_an_open_loser() {
+    let mut fixture = Fixture::with_liquidity(lp_valuation_risk_params(), 1_000 * ONE);
+    fixture
+        .open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE)
+        .expect("open");
+    fixture.advance(60, 150);
+    fixture.set_price(9_000);
+
+    let (newcomer, tokens) = fixture.newcomer();
+    let shares =
+        CreateAssociatedTokenAccount::new(&mut fixture.svm, &newcomer, &fixture.share_mint)
+            .owner(&newcomer.pubkey())
+            .send()
+            .expect("new LP share account");
+    let instruction = fixture.lp_deposit_ix_for(newcomer.pubkey(), tokens, shares, 1_000 * ONE);
+    let before = snapshot_accounts(
+        &fixture,
+        &[
+            fixture.pool,
+            fixture.quote_vault,
+            fixture.share_mint,
+            fixture.pool_share_account,
+            tokens,
+            shares,
+            fixture.market,
+            fixture.position_key(),
+        ],
+    );
+    expect_error(
+        fixture.send(instruction.clone(), &[&newcomer]),
+        PerpsError::LpValuationUnavailable,
+    );
+    assert_accounts_unchanged(&fixture, before);
+
+    let trader_before = fixture.token_balance(fixture.trader_token_account);
+    fixture.close().expect("settle the trader loss");
+    assert_eq!(
+        fixture.token_balance(fixture.trader_token_account) - trader_before,
+        99_910_000
+    );
+    assert_eq!(fixture.pool_state().quote_deposited, 1_100_081_000);
+    assert_eq!(fixture.pool_state().pending_protocol_fees, 9_000);
+    fixture
+        .send(instruction, &[&newcomer])
+        .expect("deposit at settled equity");
+    assert_eq!(fixture.token_balance(shares), 909_023_971);
+    assert_eq!(fixture.pool_state().quote_deposited, 2_100_081_000);
+    assert_eq!(fixture.pool_state().total_shares, 1_909_023_971);
+    fixture.assert_i1("after the correctly priced deposit");
+}
+
+#[test]
+fn lp_requests_can_be_cancelled_with_open_positions_and_all_pauses() {
+    let mut fixture = Fixture::with_liquidity(lp_valuation_risk_params(), 1_000 * ONE);
+    fixture
+        .open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE)
+        .expect("open");
+    fixture.set_pause_flags(PauseFlags::ALL);
+    let before = fixture.token_balance(fixture.lp_share_account);
+    fixture
+        .request_lp_withdraw(400 * ONE)
+        .expect("requests do not price shares");
+    assert_eq!(
+        fixture.token_balance(fixture.lp_share_account),
+        before - 400 * ONE
+    );
+    fixture
+        .cancel_lp_withdraw()
+        .expect("the owner can recover escrowed shares");
+    assert_eq!(fixture.token_balance(fixture.lp_share_account), before);
+    assert_eq!(fixture.pool_state().locked_quote, 200 * ONE);
+    assert_eq!(fixture.pool_state().reserved_quote, 100 * ONE);
+    fixture.assert_i1("cancellation while open and paused");
+}
+
+#[test]
+fn an_open_intent_cannot_silently_accept_a_risk_retune() {
+    let mut fixture = Fixture::new(active_params());
+    let old_revision = fixture.market_state().risk_revision;
+    let instruction = fixture.open_ix(SIDE_LONG, BIG_SIZE, 1_100 * ONE);
+    fixture
+        .set_risk_params(fixture.market, active_params())
+        .expect("even a no-op retune revises consent");
+    assert_eq!(fixture.market_state().risk_revision, old_revision + 1);
+    fixture.advance(1, 1);
+    fixture.set_price(10_000);
+    let before = snapshot_accounts(
+        &fixture,
+        &[
+            fixture.pool,
+            fixture.quote_vault,
+            fixture.market,
+            fixture.trader_token_account,
+        ],
+    );
+    let trader = fixture.trader.insecure_clone();
+    expect_error(
+        fixture.send(instruction, &[&trader]),
+        PerpsError::MarketRiskRevisionMismatch,
+    );
+    assert_accounts_unchanged(&fixture, before);
+    assert!(
+        !fixture.position_exists(),
+        "failed consent must roll back PDA initialization"
+    );
+    assert_eq!(fixture.market_state().next_position_id, 0);
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 1_100 * ONE)
+        .expect("a newly consented intent opens");
+    assert_eq!(fixture.position_state().position_id, 1);
+    assert_eq!(fixture.market_state().next_position_id, 1);
+}
+
+#[test]
+fn open_intents_require_a_live_deadline_and_accept_its_exact_slot() {
+    let mut fixture = Fixture::new(active_params());
+    let trader = fixture.trader.insecure_clone();
+    for deadline in [0, fixture.now_slot - 1, fixture.now_slot] {
+        let mut instruction = fixture.open_ix(SIDE_LONG, BIG_SIZE, 1_100 * ONE);
+        let mut params = OpenPositionParams::deserialize(&mut &instruction.data[8..]).unwrap();
+        params.valid_until_slot = deadline;
+        instruction.data = sakura_perps::instruction::OpenPosition { params }.data();
+        if deadline == fixture.now_slot {
+            fixture
+                .send(instruction, &[&trader])
+                .expect("deadline is inclusive");
+        } else {
+            let before = snapshot_accounts(
+                &fixture,
+                &[
+                    fixture.pool,
+                    fixture.quote_vault,
+                    fixture.market,
+                    fixture.trader_token_account,
+                ],
+            );
+            expect_error(
+                fixture.send(instruction, &[&trader]),
+                PerpsError::IntentExpired,
+            );
+            assert_accounts_unchanged(&fixture, before);
+            assert!(!fixture.position_exists());
+        }
+    }
+    assert_eq!(
+        fixture.market_state().next_position_id,
+        1,
+        "rejected opens consume no generation"
+    );
+}
+
+#[test]
+fn an_old_close_cannot_close_a_reopened_position_even_in_the_same_slot() {
+    let mut fixture = Fixture::new(active_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 1_100 * ONE)
+        .expect("first open");
+    let first_id = fixture.position_state().position_id;
+    let first_slot = fixture.position_state().opened_slot;
+    let old_close = fixture.close_ix();
+    fixture.close().expect("first close");
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 1_100 * ONE)
+        .expect("reopen the same PDA");
+    assert_eq!(fixture.position_state().opened_slot, first_slot);
+    assert_eq!(fixture.position_state().position_id, first_id + 1);
+    let before = snapshot_accounts(
+        &fixture,
+        &[
+            fixture.pool,
+            fixture.quote_vault,
+            fixture.market,
+            fixture.trader_token_account,
+            fixture.position_key(),
+        ],
+    );
+    let trader = fixture.trader.insecure_clone();
+    expect_error(
+        fixture.send(old_close, &[&trader]),
+        PerpsError::PositionGenerationMismatch,
+    );
+    assert_accounts_unchanged(&fixture, before);
+    fixture
+        .close()
+        .expect("a close bound to the new generation works");
+    assert_eq!(fixture.market_state().next_position_id, first_id + 1);
+}
+
+#[test]
+fn intent_counters_fail_closed_at_u64_max_without_changing_accounts() {
+    let mut fixture = Fixture::new(active_params());
+    fixture.write_market(|market| market.next_position_id = u64::MAX);
+    let before = snapshot_accounts(
+        &fixture,
+        &[
+            fixture.pool,
+            fixture.quote_vault,
+            fixture.market,
+            fixture.trader_token_account,
+        ],
+    );
+    expect_error(
+        fixture.open(SIDE_LONG, BIG_SIZE, 1_100 * ONE),
+        PerpsError::MathOverflow,
+    );
+    assert_accounts_unchanged(&fixture, before);
+    assert!(!fixture.position_exists());
+
+    fixture.write_market(|market| market.risk_revision = u64::MAX);
+    let before = snapshot_accounts(&fixture, &[fixture.market]);
+    expect_error(
+        fixture.set_risk_params(fixture.market, active_params()),
+        PerpsError::MathOverflow,
+    );
+    assert_accounts_unchanged(&fixture, before);
+}
+
+#[test]
+fn a_legacy_position_with_zero_generation_remains_closeable() {
+    let mut fixture = Fixture::new(active_params());
+    fixture
+        .open(SIDE_LONG, BIG_SIZE, 1_100 * ONE)
+        .expect("open");
+    let address = fixture.position_key();
+    let mut account = fixture.svm.get_account(&address).unwrap();
+    let mut position = fixture.position_state();
+    position.position_id = 0;
+    let mut data = account.data[..8].to_vec();
+    position.serialize(&mut data).unwrap();
+    assert_eq!(
+        data.len(),
+        account.data.len(),
+        "no layout migration is needed"
+    );
+    account.data = data;
+    fixture.svm.set_account(address, account).unwrap();
+    fixture
+        .close()
+        .expect("legacy zero generation is an exact match");
+    assert!(!fixture.position_exists());
+}
+
 /// Lowering the utilisation ceiling below current utilisation blocks **new
 /// risk** and invalidates **no open position**.
 ///
 /// This is the split between I2's two forms, and getting it wrong bricks the
 /// protocol rather than merely being untidy. `open_position` and `lp_withdraw`
-/// are judged against the ceiling in force; the three settlement paths and
-/// `lp_deposit` are judged against the pre-state instead. Judging a close by the
-/// ceiling would mean an admin who lowered it below current utilisation had
-/// reverted every exit — and, because `set_pool_limits` caps at
-/// `M5_MAX_UTILIZATION_BPS`, could not raise it back, while `lp_deposit` (the
-/// only other way utilisation falls) would be reverting too.
+/// are judged against the ceiling in force; settlements use the pre-state.
+/// Judging a close by the ceiling would mean an admin who lowered it below
+/// current utilisation had reverted every position exit. LP flows require all
+/// claims to settle, so those would remain blocked as well.
 #[test]
 fn lowering_the_utilisation_ceiling_blocks_new_risk_but_not_exits() {
     let mut fixture = Fixture::new(active_params());

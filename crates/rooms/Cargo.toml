@@ -1,0 +1,9 @@
+[package]
+name = "sakura-perps-rooms"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+description = "Experimental paper-only Risk Rooms with isolated backing and replayable consent receipts"
+
+[dependencies]
+sakura-perps-risk = { path = "../risk" }

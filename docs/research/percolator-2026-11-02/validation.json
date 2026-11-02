@@ -1,0 +1,112 @@
+{
+  "review_date": "2026-11-02",
+  "branch": "codex/percolator-risk-rooms",
+  "baseline_commit": "2bb0f71b12700e64dce172a9ddf4abc1ae51d258",
+  "scope": "Local source build and tests; no deployment, audit, Kani run or upstream test suite execution",
+  "host": {
+    "os": "Darwin",
+    "architecture": "arm64",
+    "rust": "1.89.0",
+    "anchor_cli": "1.1.2",
+    "agave_distribution": "4.1.2",
+    "cargo_build_sbf": "4.1.0",
+    "sbf_platform_tools": "v1.54",
+    "node": "26.12.0",
+    "ci_node_target": "22 (remote CI not run for this local commit)"
+  },
+  "artifacts": [
+    {
+      "path": "target/deploy/sakura_perps.so",
+      "sha256": "1d0656ffe2f336fd87e2f82ff1918456d1712a45a867672ee4f4ac5104198a6b"
+    },
+    {
+      "path": "target/idl/sakura_perps.json",
+      "sha256": "a6f3a0e2ec5cca442dae79e5f7270cbba8c31809f5da28730c320dfd3bfeae4b"
+    },
+    {
+      "path": "target/types/sakura_perps.ts",
+      "sha256": "4df19f8973d7f258be4056c41d187d87bcb89f2a212d20cca5ebf4651d64647b"
+    }
+  ],
+  "validation": {
+    "risk_tests": {
+      "passed": 94,
+      "note": "37 unit +56 property +1 corrected borrow repricing regression; changed regression rerun after fee correction"
+    },
+    "program_host_tests": {
+      "passed": 27
+    },
+    "svm_tests": {
+      "passed": 99,
+      "failed": 0,
+      "ignored": 0,
+      "artifact": "target/deploy/sakura_perps.so",
+      "breakdown": {
+        "account_layout": 1,
+        "admin": 8,
+        "collateral": 3,
+        "oracle": 12,
+        "positions": 57,
+        "vault": 18
+      }
+    },
+    "rooms_tests": {
+      "passed": 17
+    },
+    "rooms_example": {
+      "successful_records_replayed": 22,
+      "adversarial_expectations": "asserted"
+    },
+    "keeper_tests": {
+      "passed": 17
+    },
+    "typescript": "tsc --noEmit passed",
+    "format": "cargo fmt --all -- --check passed",
+    "lint": "cargo clippy --all-targets --locked -- -D warnings passed",
+    "client_abi": "generated JSON and TS exactly match committed files; prior error codes, program ID, instruction discriminators and account lists unchanged",
+    "diff_check": "git diff --check passed"
+  },
+  "source_sha256": {
+    "Anchor.toml": "7f6673fae6022022b10a26b7559600a9bae5d8944d7068f795450e5dc288b035",
+    "Cargo.lock": "12136610c503c7f316649f86b94be1309202a57c23611e984d47f74198b35321",
+    "Cargo.toml": "94cfa495c40776870b69ed00e2ef51d98f60f7ca9c0bc80ac5f50ea2e2c30e74",
+    "crates/risk/Cargo.toml": "504c1e71218d0812a89606c7736c029b24e917b96cd9daeda88691f763be0b4f",
+    "crates/risk/src/error.rs": "3dbe8aff1681d749856b1e00620614e9aa402f5c775cb8a519f1b288bf469e6d",
+    "crates/risk/src/funding.rs": "5cffc5fdabb21fe79581e289f0213dfe028f77f0ef9b093d2c471482084beaf5",
+    "crates/risk/src/lib.rs": "a0137b2815ec0acc711cda849de96f3d4b1160871165e438106105b93559e89a",
+    "crates/risk/src/math.rs": "51c5dc926a32c0b93a74ba69068877868cee516edec73dd9d6f934d44da6f8a5",
+    "crates/risk/src/oracle.rs": "6c4036c8ceb700a15e326398e4d9a996b5dc656efbbca89120b6aa1a8afe0d33",
+    "crates/risk/src/pool.rs": "4fc7b8d86f91ec7d6a73ccd4083887b3608c5dc874334060c4898bede91bae6c",
+    "crates/risk/src/position.rs": "b29ddca74fe3d3d9a04a1e4486c1bbf549a320648c1bf8ff4db16acc9cacb464",
+    "crates/risk/src/scale.rs": "e3d53f7f8e46ee11edf9cbcf43ff720f67e37d5aa05e48d7cb6a111a3975dc34",
+    "crates/risk/tests/borrow_repricing.rs": "439fd24a201158a633a088a773d9f9533020e4818b73462dadbbf42db4e67396",
+    "crates/risk/tests/invariants.rs": "a3285377c4969d416473d91acab82f9155fb698ec85e2465dd33aa65893f8655",
+    "crates/rooms/Cargo.toml": "29a9c528fb2101100b6922541f00719373e360bf7e1713200877d5d20e4c1456",
+    "crates/rooms/examples/community_season.rs": "9c877d295b4848c3095e5e6358c2319f2af7586e350b9598800f6c068d52e4f7",
+    "crates/rooms/src/lib.rs": "b207c4a6729345f78c18e1812c0e45b0fd7084e2bc7bc16cc50561fe2f9ec9d1",
+    "crates/rooms/tests/kernel.rs": "f40b60fae86846e418741963b957ef40eb825a8bdd97f4d9cedc22f1ca36bcf4",
+    "crates/svm-tests/Cargo.toml": "b01981589a0be48abd1476313b9f9d86f743d8b489899f4c570f9c2387ad7b7a",
+    "crates/svm-tests/src/lib.rs": "a3b03c075315204fe2e261368ec11bbb31182bce85e8a39f756e7c6bc0d92e33",
+    "crates/svm-tests/tests/account_layout.rs": "8aff20d084c24ff616edaca4cae1eb0504cb7a71cd2d095e123e457da1ac902f",
+    "crates/svm-tests/tests/admin_rotation.rs": "9288d4b0e53bf764bc8a4687299ef62ab1b6ec59b90b8d88387c87c07bcf3f72",
+    "crates/svm-tests/tests/collateral_guard.rs": "010f93b8309d01aa08da5d6105286990c32363657d38608e4370592fc8fd22dd",
+    "crates/svm-tests/tests/oracle.rs": "223c60ccc732df16da1315bf4376e7120159ffaa7eda5dd7ac32d8ffeb7df61b",
+    "crates/svm-tests/tests/positions.rs": "76465747b697f2e36069a3a52d4eee65d275f7d9a8aff556f54a9a8a8df46312",
+    "crates/svm-tests/tests/vault.rs": "e201a0fdb0d70b2639018b29912a5ace0c30fc5236fb2b026fc65bdcea17cabb",
+    "programs/sakura-perps/Cargo.toml": "77930acbe4428add40ee010f16148a87a846304578edd4e437f62079e076460b",
+    "programs/sakura-perps/src/admin_tests.rs": "e544f473dc9e0bd1de4c9aebae3bec03636d3f703739791da3ca56e9aaf7a039",
+    "programs/sakura-perps/src/lib.rs": "052088cfb410577d714aecf840ac774e0089a131353ccf5a487dc13f06e831a9",
+    "programs/sakura-perps/src/market.rs": "08d7900b06abf24bb1418863c089d4fc7017f3a39a7f9cc1379e99d8d8df77d3",
+    "programs/sakura-perps/src/oracle.rs": "0159140f1fea29a0f0161b9c898992ecc110ec320ba411e0de4acd39640be87b",
+    "programs/sakura-perps/src/pool.rs": "5ff4c7cefd8986c91bbd56f1c2feb3f33004a47d7e7fe934d54418a895871cd8",
+    "programs/sakura-perps/src/position.rs": "0bda21a77329aad8cd0606a88ba881570593d45e2af3605bbaa555822a3a36c9",
+    "rust-toolchain.toml": "bf5a1ca120b8c9e69b82b3331ce8f60a8d92cc568b697b9196d02badf35c8659"
+  },
+  "limitations": [
+    "Single-host SBF build is not independently reproduced or deployed-bytecode verified.",
+    "LP gate can block all pool deposits/redemptions indefinitely while positions remain open.",
+    "Historical utilization accrual, emergency settlement and other release gates remain unresolved.",
+    "Rooms is an in-memory finite-contract simulator with asserted identities and a trusted terminal-price publisher.",
+    "No terminal observation means no maturity settlement; permanent oracle outage recovery is unspecified."
+  ]
+}

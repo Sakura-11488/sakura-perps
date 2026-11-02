@@ -91,10 +91,14 @@ change. A host test alone does not verify the deployed runtime.
 
 ## Remaining release gates
 
-1. **LP valuation and exit fairness.** Share pricing still uses
-   `pool.quote_deposited` without open-position liabilities. The 20% reserve
-   utilization ceiling bounds exposure; it is not a valuation fix. Specify and
-   test liability-aware deposits/withdrawals before increasing limits.
+1. **LP valuation and exit fairness.** The 2026-11-02 source blocks deposits and
+   redemptions until both locked collateral and profit reserves are zero.
+   This contains known mispricing paths, but positions can block LP exit
+   indefinitely. The 20% reserve ceiling does not bound omitted trader losses.
+   Specify and test liability-aware valuation and bounded exits. Also resolve
+   borrow accrual charging the prior interval at current pool utilization;
+   changing the pool size before accrual can reprice elapsed time. See the
+   [Percolator and Risk Rooms report](research/2026-11-02-percolator-and-risk-rooms.md).
 2. **Emergency prices and oracle policy.** Review how liquidation-grade updates
    can refresh `last_good_price`, how stale emergency settlement distributes
    value, and the relationship between margin, confidence and spread. Add

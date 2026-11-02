@@ -92,7 +92,12 @@ pub struct Position {
     /// here, which is the zero-spread case: `execution_price` is total at
     /// `spread_bps == 0`, so the fallback cannot make an exit unpriceable.
     pub spread_bps: u16,
-    pub _reserved: [u8; 62],
+    /// Market-wide generation allocated at open. The PDA can be reused, but
+    /// this ID cannot: an old signed close must not retire its replacement.
+    /// Taken from reserved bytes; legacy live positions read ID 0 and remain
+    /// closeable by explicitly signing that ID.
+    pub position_id: u64,
+    pub _reserved: [u8; 54],
 }
 
 // The on-chain length is frozen. There are live devnet accounts, and Anchor has
@@ -207,6 +212,11 @@ pub struct OpenPositionParams {
     /// would accept every price, so the two readings disagree about what
     /// "unset" means and only an explicit rejection settles it.
     pub limit_price: u128,
+    /// Exact entry policy accepted by this signature. Read from the market
+    /// when quoting; any subsequent successful retune invalidates the intent.
+    pub expected_risk_revision: u64,
+    /// Last slot in which the intent may execute, inclusive. Zero is invalid.
+    pub valid_until_slot: u64,
 }
 
 /// Arguments to [`crate::sakura_perps::close_position`].
@@ -217,6 +227,9 @@ pub struct ClosePositionParams {
     /// for a short, which pays. Zero is rejected, per
     /// [`OpenPositionParams::limit_price`].
     pub limit_price: u128,
+    /// Exact position generation accepted by this signature, read from the
+    /// position account. A replacement at the same PDA has a different ID.
+    pub expected_position_id: u64,
 }
 
 /// Book a fee the vault has **already retained**.
@@ -659,6 +672,17 @@ fn emergency_reference_price(market: &Market, position: &Position) -> u128 {
 
 pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionParams) -> Result<()> {
     let clock = Clock::get()?;
+    // Check the signed economic intent before accrual or token movement.
+    // Anchor's account initialization is covered by transaction rollback if
+    // either gate rejects, just like every other failed opening precondition.
+    require!(
+        params.valid_until_slot != 0 && clock.slot <= params.valid_until_slot,
+        PerpsError::IntentExpired
+    );
+    require!(
+        params.expected_risk_revision == ctx.accounts.market.risk_revision,
+        PerpsError::MarketRiskRevisionMismatch
+    );
     let collateral_decimals = ctx.accounts.exchange.collateral_decimals;
     let protocol_fee_share_bps = ctx.accounts.exchange.protocol_fee_share_bps;
 
@@ -679,6 +703,12 @@ pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionPara
         PerpsError::InvalidPositionSide
     );
     require!(params.limit_price > 0, PerpsError::SlippageExceeded);
+    let position_id = ctx
+        .accounts
+        .market
+        .next_position_id
+        .checked_add(1)
+        .ok_or(PerpsError::MathOverflow)?;
 
     // 2. Accrue first, so both indices are current before they are snapshotted.
     //    Snapshotting a stale index would silently forgive the position every
@@ -847,6 +877,7 @@ pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionPara
     // 9. Snapshots. Every parameter a close will judge this position by is
     //    copied now, so an admin retuning the market cannot reach it. The module
     //    docs say why `spread_bps` is the sharpest case of that.
+    ctx.accounts.market.next_position_id = position_id;
     let position = &mut ctx.accounts.position;
     position.bump = ctx.bumps.position;
     position.owner = owner_key;
@@ -865,6 +896,7 @@ pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionPara
     position.entry_funding_index = ctx.accounts.market.cum_funding_index;
     position.opened_ts = clock.unix_timestamp;
     position.opened_slot = clock.slot;
+    position.position_id = position_id;
 
     // 13. The ledger.
     apply_open_ledger(
@@ -911,6 +943,12 @@ pub fn handle_close_position(
     params: ClosePositionParams,
 ) -> Result<()> {
     let clock = Clock::get()?;
+    // The owner/market PDA is reusable after close. A price limit alone does
+    // not distinguish the position the owner signed for from a later one.
+    require!(
+        params.expected_position_id == ctx.accounts.position.position_id,
+        PerpsError::PositionGenerationMismatch
+    );
     let collateral_decimals = ctx.accounts.exchange.collateral_decimals;
     let protocol_fee_share_bps = ctx.accounts.exchange.protocol_fee_share_bps;
 
@@ -2021,7 +2059,8 @@ mod tests {
                 opened_ts: 0,
                 opened_slot: 0,
                 spread_bps: market.spread_bps,
-                _reserved: [0u8; 62],
+                position_id: 0,
+                _reserved: [0u8; 54],
             },
             open_fee_quote,
             // Step 7 read backwards: the gross the trader sent is what the

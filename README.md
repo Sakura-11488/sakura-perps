@@ -7,7 +7,7 @@
 
 Permissionless oracle-and-pool perpetual futures on Solana.
 
-**Status reviewed 2026-10-29:** a devnet protocol prototype with implemented
+**Source reviewed 2026-11-02:** a devnet protocol prototype with implemented
 trading and liquidation paths, still incomplete and unaudited.
 The latest recorded deployment is `devnet-v0.7.0` (2026-08-26).
 A read-only check on 2026-10-29 confirmed that the devnet program exists and is
@@ -19,7 +19,7 @@ executable; it did not re-verify its bytecode or run a trade.
 | Funding and borrow | Index accrual and settlement on position paths | Funding-farm mitigation and settlement cadence |
 | Liquidation | Permissionless on-chain liquidation; exercised on devnet on 2026-08-30 | Insurance and bad-debt recovery; debt is currently recorded |
 | Keeper | Off-chain simulation, oracle-update construction, submission and safety rails | Working price-feed access, a proven pinned-feed refresh, and sustained operation |
-| LP accounting | Share mint/burn and a 20% utilization ceiling | Share valuation that accounts for open-position liabilities |
+| LP accounting | Share mint/burn; new source blocks deposits/redemptions while the pool has open claims | Liability-aware valuation and bounded LP exit; the temporary guard can lock LPs indefinitely |
 | Administration | Admin-gated feed qualification and risk controls; two-step rotation implemented in source | Deploy and rehearse rotation; multisig/timelock governance and audit |
 | Dashboard | Read-only devnet monitor with bounded API errors and explicit unknown observations | Operational validation; reference oracle checks are not live-market acceptance |
 | App integration | IDL, generated types and keeper clients | Reusable SDK and integration with this protocol; Sakura's current app uses Phoenix |
@@ -36,6 +36,32 @@ submissions and spending reservations, fair scan coverage, truthful dashboard
 status, and two-step admin rotation. These source changes have not been deployed.
 See [security controls, operating notes and remaining gates](docs/security-hardening.md).
 
+**Product direction:** crypto-native communities, teams, strategy and social
+play. A new [Risk Rooms paper prototype](crates/rooms/README.md) makes the proposed
+budget and backing rules executable: each member has owner-controlled limits,
+delegates have restricted authority, and each position names its separately
+funded backing cell. It is a finite capped-contract simulator, not a deployed
+perpetual market or a complete app. See the
+[market research, security evidence and prioritized build plan](docs/research/2026-10-30-perps-direction.md).
+
+**Percolator research and implementation, 2026-11-02:** reviewed all six
+`aeyakovenko/percolator*` repositories at pinned commits. Their current branches
+do not constitute one compatible release. Sakura adopts intent binding and
+separation of funded obligations without importing the engine. New source binds
+opens to a risk-policy revision and slot deadline, and closes to a unique
+position generation. The [research report](docs/research/2026-11-02-percolator-and-risk-rooms.md)
+records source evidence, the LP attack traces, rejected approaches and release
+gates. These changes are **undeployed** and do not establish novelty or security
+certification. Open/close instruction arguments changed; regenerate clients
+against the accompanying IDL before any coordinated devnet upgrade.
+
+Run the paper community scenario without a wallet or RPC:
+
+```bash
+cargo run -p sakura-perps-rooms --example community_season --locked
+cargo test -p sakura-perps-rooms --locked
+```
+
 ---
 
 ## What this is
@@ -49,11 +75,11 @@ Market listing is **permissionless**: anyone may create a market for an asset
 whose price feed has been qualified. A newly created market opens *quarantined*,
 with zero open-interest allowance, until its risk parameters are set.
 
-That split is deliberate and it is the core safety idea here. Permissionless
-*listing* is safe. Permissionless *feed qualification* is not — on some oracle
-networks anyone can create a feed backed by arbitrary jobs, so "any feed with low
-variance" would be equivalent to no gate at all. The oracle allowlist is
-admin-controlled; everything downstream of it is open.
+Permissionless market creation does not authorize trading. Feed qualification
+and risk limits remain security decisions: low variance alone does not establish
+that a feed is trustworthy or its underlying market is deep enough. The oracle
+allowlist is admin-controlled, and new markets remain quarantined until their
+risk parameters are set.
 
 ## What this is not
 
@@ -98,18 +124,18 @@ Versions must match. If yours differ, expect failure.
 | SBF platform-tools | v1.54 (bundled with Agave 4.1.2) |
 | Node | 22 |
 
-These versions are not arbitrary — they are the only combination that works, and
-finding it cost real time:
+These are the repository's supported versions. Other combinations need their
+own compatibility checks:
 
 - Anchor 1.1.2 requires Rust **1.89**, via its `wincode` dependency.
 - Several crates in `anchor-spl`'s transitive tree now require **edition 2024**,
   which Rust stabilised in 1.85. Older platform-tools ship Rust 1.84 and die with
   ``feature `edition2024` is required`` before compiling a line of your code.
-- Agave 4.1.2 bundles platform-tools **v1.54**, whose Rust is 1.89. Older Agave
-  bundles v1.51 and does not work with current Anchor.
-- Installing v1.54 *alongside* an older Agave does not help: `anchor build` does
-  not reach for it, and passing `--tools-version` through `anchor build --` is
-  rejected by the IDL builder *after* the program has already compiled.
+- Agave 4.1.2 defaults to platform-tools **v1.54**, whose Rust is 1.89. The
+  Anchor 1.1.2 prebuilt CLI was observed selecting v1.52 instead, so CI now
+  explicitly selects v1.54 with `cargo-build-sbf` and builds the IDL separately.
+- Do not forward `--tools-version` through `anchor build --`: it can also reach
+  the host IDL compiler, which does not accept the SBF-specific flag.
 
 The Anchor CLI version **must equal** `anchor-lang`. If they drift, account
 discriminators and the generated IDL diverge from what the deployed program
@@ -168,8 +194,10 @@ a standalone Rust alongside rustup.
 git clone https://github.com/Sakura-11488/sakura-perps.git
 cd sakura-perps
 pnpm install
-anchor build
-anchor test
+cargo-build-sbf --manifest-path programs/sakura-perps/Cargo.toml --tools-version v1.54
+mkdir -p target/idl target/types
+anchor idl build --out target/idl/sakura_perps.json --out-ts target/types/sakura_perps.ts
+SAKURA_PERPS_SO="$PWD/target/deploy/sakura_perps.so" cargo test -p sakura-perps-svm-tests --locked
 ```
 
 ## Devnet
@@ -465,7 +493,7 @@ program ownership and the seeds you write — nothing else. Every other binding 
 an implementer's invention. `has_one = market`, the vault seeds, and the token
 mint and owner pins are now explicit.
 
-### LP share pricing ships as a bound, not a fix
+### LP flows require a settled pool
 
 Shares price off `pool.quote_deposited`, which ignores what open positions are
 owed. The obvious fix — an aggregate mark — was designed, reviewed, and
@@ -475,17 +503,26 @@ summation. Two longs at +100 and −100 net to zero aggregate PnL while the pool
 genuinely owes the winner 100, so a balanced two-sided book — the normal state of
 a perp DEX — marks to a liability of zero.
 
-No aggregate over `(Σ size, Σ entry_notional)` can compute it, and pricing off
-`reserved_quote` instead is worse than the bug in both directions. So M5 ships
-the bound: `M5_MAX_UTILIZATION_BPS = 2_000` caps reserved at 20% of AUM, which is
-a provable ceiling on how far a share price can be overstated. `risk::pool::aum_usd`
-stays uncalled and undeleted; §4.4 of the spec names what M6 must build to call it.
+No aggregate over `(Σ size, Σ entry_notional)` can compute it. The 20% reserve
+ceiling limits reserved trader profits; it does not bound valuation error from
+unsettled trader losses. The prior claim that it bounded all LP mispricing was
+too broad. A withdrawal delay also does not remove the transfer of value.
+
+The 2026-11-02 source therefore rejects LP minting and redemption whenever
+`locked_quote != 0` or `reserved_quote != 0`. Requests, cancellations and trader
+settlement remain available, and LP flows resume when the book is flat. This
+contains the demonstrated entry/exit pricing paths but can block LPs indefinitely
+if positions remain open. It is not a production exit design. Liability-aware
+valuation, settlement cadence and executable exit guarantees remain release gates.
 
 ### Account layouts are size-locked
 
 Every stage-3 field came out of `_reserved` rather than off the end — `Market`
 128→96, `Position` 64→62, `Pool` 120→128 less the inert `min_liquidity_quote`.
-Six compile-time `INIT_SPACE` asserts hold it there, because growing a struct
+The new market revision/sequence counters reduce `Market::_reserved` from 96 to
+80 bytes, and the position generation reduces `Position::_reserved` from 62 to
+54. Legacy zeros remain valid, with legacy positions using generation 0 and new
+ones starting at 1. Six compile-time `INIT_SPACE` asserts hold the lengths, because growing a struct
 orphans every live devnet account rather than migrating it.
 
 ### Compute budget, measured
@@ -642,13 +679,16 @@ Milestones describe implementation and remaining work, not a completion percenta
 | 1 — repo, CI, first devnet deploy | Implemented | Ongoing maintenance |
 | 2 — fixed-point risk core and property tests | Implemented | Broader adversarial validation |
 | 3 — oracle validation | Implemented | Keeper-controlled refresh still needs live proof |
-| 4 — collateral vault | Implemented | LP valuation must account for open-position liabilities |
+| 4 — collateral vault | Implemented; source restricts LP flows to a settled pool | Liability-aware valuation and bounded LP exits |
 | 5 — positions and isolated margin | Deployed in `devnet-v0.6.0` | Economic hardening |
 | 6 — funding and borrow fees | Accrual and settlement implemented | Funding-farm mitigation and settlement cadence |
 | 7 — liquidation, insurance and bad debt | Partial: liquidation deployed in `devnet-v0.7.0`; bad debt recorded | Insurance/recovery and remaining economic risks |
 | 8 — liquidation keeper | Implemented for devnet; operation not fully demonstrated | Price-feed access, verified refresh, paid automated liquidation and operating history |
 | 9 — TypeScript SDK and app integration | Pending; IDL and internal clients exist | Reusable SDK and a Sakura integration with this program |
-| 10 — hardening and audit preparation | First source batch: admin rotation, keeper persistence/budgets/coverage, dashboard safeguards and CI regressions | Deployment rehearsal, dependency remediation, governance, fuzzing, reproducible-build validation and independent audit |
+| 10 — hardening and audit preparation | Source batches: admin rotation, keeper persistence/budgets/coverage, dashboard safeguards, bound trade intents and LP containment | Economic design, deployment rehearsal, dependency remediation, governance, fuzzing, reproducible-build validation and independent audit |
+
+The community Risk Rooms work is a separate paper experiment. It does not
+advance the live protocol's deployment, SDK or audit milestones by itself.
 
 Sakura's current Expo trading screen uses Phoenix. It is not an integration with
 this program; the interface does not establish completion of milestone 9.

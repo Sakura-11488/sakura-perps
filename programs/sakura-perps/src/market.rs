@@ -308,13 +308,19 @@ pub struct Market {
     /// oracle back the veto the field exists to remove.
     pub last_good_price_ts: i64,
 
-    /// 128 originally. `quarantined_ts`, `last_good_price` and
-    /// `last_good_price_ts` were taken from here rather than appended, so the
-    /// account's length is unchanged and no existing instance needs
-    /// reallocating. A market written before those fields existed reads zero for
-    /// all three, which is the "never quarantined, never priced" case both the
-    /// wind-down delay and `emergency_reference_price` already handle.
-    pub _reserved: [u8; 96],
+    /// Monotonic revision of the entry risk parameters. An opening signature
+    /// binds this value so a later retune cannot silently change its fees, cap,
+    /// margin requirements, or the terms it snapshots for closing.
+    pub risk_revision: u64,
+    /// Last allocated position ID. Every successful open increments it, even
+    /// when reusing a closed owner/market PDA in the same slot. Markets have no
+    /// close/reinitialize instruction, so an owner cannot reset this sequence.
+    pub next_position_id: u64,
+
+    /// 128 originally. Recovery fields and the two intent counters consume
+    /// reserved bytes without changing the account length. Older accounts read
+    /// zero for the counters; their first new position receives ID 1.
+    pub _reserved: [u8; 80],
 }
 
 // The on-chain length is frozen. Anchor has no migration story: a changed
@@ -584,6 +590,8 @@ pub fn handle_create_market(ctx: Context<CreateMarket>) -> Result<()> {
     market.quarantined_ts = clock.unix_timestamp;
     market.last_good_price = 0;
     market.last_good_price_ts = 0;
+    market.risk_revision = 0;
+    market.next_position_id = 0;
 
     let market_key = market.key();
     let feed_id = market.feed_id;
@@ -737,6 +745,12 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
 
     let clock = Clock::get()?;
     let market = &mut ctx.accounts.market;
+    // A successful call always invalidates previously quoted entry terms,
+    // including a no-op retune. Never wrap back to an old signed revision.
+    let risk_revision = market
+        .risk_revision
+        .checked_add(1)
+        .ok_or(PerpsError::MathOverflow)?;
 
     // 10. Activation bookkeeping, **on the transition only**. A retune that does
     //     not cross the boundary must leave `quarantined_ts` alone, or the
@@ -767,6 +781,7 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
     market.funding_cap_per_hour = params.funding_cap_per_hour;
     market.max_settle_window_seconds = params.max_settle_window_seconds;
     market.min_settle_interval_seconds = params.min_settle_interval_seconds;
+    market.risk_revision = risk_revision;
 
     emit!(RiskParamsSet {
         market: market.key(),
@@ -1304,7 +1319,9 @@ pub(crate) mod tests {
             quarantined_ts: 0,
             last_good_price: 0,
             last_good_price_ts: 0,
-            _reserved: [0u8; 96],
+            risk_revision: 0,
+            next_position_id: 0,
+            _reserved: [0u8; 80],
         }
     }
 
