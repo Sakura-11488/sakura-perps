@@ -74,8 +74,8 @@ where
 /// Every frozen length, and the fields carved from reserved bytes reading zero.
 ///
 /// Recovery fields and intent counters were taken **out of `_reserved`** rather
-/// than appended. Zero preserves the original recovery behavior and gives
-/// legacy positions an explicit generation that future opens never reuse.
+/// than appended. Zero marks recovery snapshots and historical accrual as
+/// unproven/uninitialized, and gives legacy positions their explicit generation.
 #[test]
 fn the_frozen_account_lengths_still_decode_a_legacy_buffer() {
     let exchange: Exchange = legacy_zero_account(304);
@@ -83,6 +83,9 @@ fn the_frozen_account_lengths_still_decode_a_legacy_buffer() {
 
     let pool: Pool = legacy_zero_account(252);
     assert_eq!(pool.max_utilization_bps, 0);
+    assert_eq!(pool.utilization_integral, 0);
+    assert_eq!(pool.utilization_last_ts, 0);
+    assert!(!pool.utilization_initialized);
     let _: WithdrawRequest = legacy_zero_account(121);
 
     let feed: QualifiedFeed = legacy_zero_account(205);
@@ -104,6 +107,10 @@ fn the_frozen_account_lengths_still_decode_a_legacy_buffer() {
         (0, 0),
         "legacy markets begin with zero intent counters without changing length"
     );
+    assert_eq!(market.last_good_price_source, 0);
+    assert_eq!(market.borrow_utilization_checkpoint, 0);
+    assert!(!market.borrow_integral_initialized);
+    assert_eq!(market.funding_remainder_carry, 0);
 
     let position: Position = legacy_zero_account(240);
     assert_eq!(

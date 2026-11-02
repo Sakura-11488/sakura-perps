@@ -33,7 +33,8 @@
 use anchor_lang::prelude::*;
 use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
 use sakura_perps_risk::funding::{
-    borrow_index_delta, fees_dominate_funding, funding_index_delta, funding_rate_per_hour,
+    borrow_index_delta, borrow_index_delta_from_integral, fees_dominate_funding,
+    funding_index_delta, funding_index_delta_with_carry, funding_rate_per_hour,
 };
 use sakura_perps_risk::math::{mul_div_ceil, mul_div_floor};
 use sakura_perps_risk::oracle::{
@@ -75,9 +76,8 @@ pub const POLICY_HOLDING_PERIOD_SECONDS: u64 = 3_600;
 
 /// Upper bound on `max_settle_window_seconds`: seven days.
 ///
-/// The window caps Δt per accrual call. A longer one lets a market nobody
-/// settled for a month charge the whole month in a single jump, against a
-/// utilisation figure that has nothing to do with the period being charged for.
+/// Retained only for legacy drain-only accounting and ABI compatibility.
+/// Migrated books integrate recorded utilization over the full elapsed time.
 pub const MAX_SETTLE_WINDOW_SECONDS: u32 = 7 * 24 * 60 * 60;
 
 /// One percent per hour, the ceiling on `borrow_rate_per_hour`.
@@ -254,7 +254,8 @@ pub struct Market {
     pub borrow_rate_per_hour: u128,
     pub funding_sensitivity: u128,
     pub funding_cap_per_hour: u128,
-    /// Caps Δt per settle call, so a long gap cannot accrue in one jump.
+    /// Legacy drain-only accrual cap. Retained for account/instruction compatibility;
+    /// migrated books accrue the full elapsed interval.
     pub max_settle_window_seconds: u32,
     /// Rate-resample interval. **Not** a floor on accrual: accrual is
     /// continuous, and throttling it would make what is owed depend on how
@@ -294,18 +295,11 @@ pub struct Market {
     /// that does not cross the boundary must leave it alone, or every fee change
     /// would restart the wind-down delay.
     pub quarantined_ts: i64,
-    /// The oracle-free settlement reference: the last price this market
-    /// transacted at, clamped into its own EMA band.
-    ///
-    /// Written by every successful guard-passing price read — both trading
-    /// paths, the admin settlement, and the permissionless
-    /// `refresh_market_price`. It is read out of this account rather than from
-    /// an oracle, which is what lets `emergency_close_position` take no price
-    /// account at all.
+    /// Latest strict validated raw oracle price recorded before quarantine.
+    /// Liquidation and admin settlement cannot write this emergency reference.
     pub last_good_price: u128,
-    /// When [`Market::last_good_price`] was written. Observability only; it
-    /// gates nothing, deliberately — a freshness gate on it would hand the
-    /// oracle back the veto the field exists to remove.
+    /// Oracle publication time, strictly increasing while cache updates are
+    /// allowed. Emergency settlement intentionally has no freshness gate.
     pub last_good_price_ts: i64,
 
     /// Monotonic revision of the entry risk parameters. An opening signature
@@ -317,10 +311,16 @@ pub struct Market {
     /// close/reinitialize instruction, so an owner cannot reset this sequence.
     pub next_position_id: u64,
 
-    /// 128 originally. Recovery fields and the two intent counters consume
-    /// reserved bytes without changing the account length. Older accounts read
-    /// zero for the counters; their first new position receives ID 1.
-    pub _reserved: [u8; 80],
+    /// 1 identifies a strict validated raw oracle observation; zero is legacy.
+    pub last_good_price_source: u8,
+    /// Pool utilization-time integral consumed by this market's borrow index.
+    pub borrow_utilization_checkpoint: u128,
+    /// Set only after an empty market joins the pool's initialized integral.
+    pub borrow_integral_initialized: bool,
+    /// Canonical funding numerator remainder in `[0, 3600)`.
+    pub funding_remainder_carry: i64,
+    /// Recovery and accounting fields consume the original reserved bytes.
+    pub _reserved: [u8; 54],
 }
 
 // The on-chain length is frozen. Anchor has no migration story: a changed
@@ -570,9 +570,8 @@ pub fn handle_create_market(ctx: Context<CreateMarket>) -> Result<()> {
     market.borrow_remainder_carry = 0;
     market.cum_funding_index = 0;
     market.sampled_funding_rate_per_hour = 0;
-    // Both clocks start now, so the first accrual measures from creation rather
-    // than from the epoch — which would be one jump of fifty-odd years, clamped
-    // to the settle window but still charged in full.
+    // First use seeds the pool integral while the market is still empty;
+    // these timestamps also keep every clock monotonic from creation.
     market.last_settle_ts = clock.unix_timestamp;
     market.last_rate_sample_ts = clock.unix_timestamp;
 
@@ -592,6 +591,10 @@ pub fn handle_create_market(ctx: Context<CreateMarket>) -> Result<()> {
     market.last_good_price_ts = 0;
     market.risk_revision = 0;
     market.next_position_id = 0;
+    market.last_good_price_source = 0;
+    market.borrow_utilization_checkpoint = 0;
+    market.borrow_integral_initialized = false;
+    market.funding_remainder_carry = 0;
 
     let market_key = market.key();
     let feed_id = market.feed_id;
@@ -678,9 +681,8 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
         PerpsError::FeesDoNotDominateFunding
     );
 
-    // 5. A zero settle window clamps every Δt to nothing, so the market never
-    //    accrues at all — a different failure from a window that is too long,
-    //    and it gets a different variant.
+    // 5. Keep the legacy drain-only window inside its original bounds.
+    //    Migrated markets no longer use it to truncate elapsed accrual.
     require!(
         params.max_settle_window_seconds > 0,
         PerpsError::InvalidRiskParameters
@@ -745,6 +747,7 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
 
     let clock = Clock::get()?;
     let market = &mut ctx.accounts.market;
+    accrue(market, &mut ctx.accounts.pool, &clock)?;
     // A successful call always invalidates previously quoted entry terms,
     // including a no-op retune. Never wrap back to an old signed revision.
     let risk_revision = market
@@ -782,6 +785,16 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
     market.max_settle_window_seconds = params.max_settle_window_seconds;
     market.min_settle_interval_seconds = params.min_settle_interval_seconds;
     market.risk_revision = risk_revision;
+    // The old rate has already paid for its elapsed interval. A retune starts
+    // the new funding schedule now, even inside the normal sampling interval.
+    market.sampled_funding_rate_per_hour = funding_rate_per_hour(
+        market.long_oi_usd,
+        market.short_oi_usd,
+        market.funding_sensitivity,
+        market.funding_cap_per_hour,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+    market.last_rate_sample_ts = market.last_settle_ts;
 
     emit!(RiskParamsSet {
         market: market.key(),
@@ -809,82 +822,107 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
     Ok(())
 }
 
-/// Accrue a market's borrow and funding indices up to `clock`.
+/// Accrue before every exposure mutation and before changing a market's rates.
 ///
-/// One implementation, six callers: the standalone `settle_market` instruction
-/// and the head of `open_position`, `close_position`, `admin_settle_position`,
-/// `emergency_close_position` and `liquidate_position`. The standalone
-/// instruction exists so accrual does not depend on trading activity; the
-/// in-line calls exist so no index is ever *read* stale.
-///
-/// `liquidate_position` was added and this list was not, which is not a cosmetic
-/// slip. Reading "five callers" is what produced a documented claim that an
-/// uncranked market leaves a position unliquidatable. It does not: the
-/// liquidation accrues before its own solvency gate, so a stale stored index
-/// protects nobody. See `a_stale_market_index_does_not_stop_a_keeper_being_paid`.
-///
-/// Returns the clamped Δt that was accrued, or `None` when nothing was written —
-/// which is what lets `settle_market` skip its event rather than emit a no-op
-/// one.
-///
-/// # Δt is clamped at both ends
-///
-/// `Clock::unix_timestamp` is a stake-weighted vote estimate and is **not**
-/// monotonic. A non-positive interval returns early and writes *nothing*: a
-/// keeper calling twice in a slot is normal, and a backwards clock revision must
-/// never become a ~1.8e19-second accrual through an unguarded `as u64`. That
-/// cast is unreachable until positivity is proven, and **no timestamp field in
-/// this program is ever written backwards.** The upper clamp is
-/// `max_settle_window_seconds`, so a long unattended gap cannot be charged in
-/// one jump against a utilisation figure from the far end of it.
-pub(crate) fn accrue(market: &mut Market, pool: &Pool, clock: &Clock) -> Result<Option<u64>> {
-    let now = clock.unix_timestamp;
+/// Migrated books consume the pool's utilization-time history and the full
+/// elapsed funding interval. Clocks only move forwards. Legacy books with open
+/// exposure retain their old clamped accounting solely so they can drain; no
+/// new position may open until the pool has reached a flat migration boundary.
+pub(crate) fn accrue(market: &mut Market, pool: &mut Pool, clock: &Clock) -> Result<Option<u64>> {
+    let migrated = crate::pool::checkpoint_utilization(pool, clock)?;
+    let now = if migrated {
+        clock.unix_timestamp.max(pool.utilization_last_ts)
+    } else {
+        clock.unix_timestamp
+    };
+
+    if migrated && !market.borrow_integral_initialized {
+        require!(
+            market.long_positions == 0
+                && market.short_positions == 0
+                && market.long_oi_usd == 0
+                && market.short_oi_usd == 0
+                && market.locked_quote == 0
+                && market.reserved_quote == 0,
+            PerpsError::MarketMigrationRequired
+        );
+        // Historical exposure is deliberately not reconstructed from today's
+        // ratio. An empty book starts here, before any new position snapshots.
+        market.borrow_utilization_checkpoint = pool.utilization_integral;
+        market.borrow_integral_initialized = true;
+        market.last_settle_ts = market.last_settle_ts.max(now);
+        market.last_rate_sample_ts = market.last_settle_ts;
+        return Ok(None);
+    }
+
     let raw = now
         .checked_sub(market.last_settle_ts)
         .ok_or(PerpsError::MathOverflow)?;
-    if raw <= 0 {
+    // A market can be created before a backwards clock revision and join a
+    // pool whose high-water mark is earlier than its creation timestamp.
+    // Borrow history must still be consumed before a retune or entry, even
+    // when the market's funding clock has not caught up to that timestamp.
+    if raw <= 0 && (!migrated || pool.utilization_integral == market.borrow_utilization_checkpoint)
+    {
         return Ok(None);
     }
-    let dt = (raw as u64).min(u64::from(market.max_settle_window_seconds));
-
-    // Borrow accrues against **pool-wide** utilisation, so borrow is coupled
-    // across markets: opening a position in one raises the borrow rate in every
-    // other. The remainder is persisted rather than discarded, so a market
-    // settled every second accrues exactly what one settled hourly does.
-    let accrual = borrow_index_delta(
-        market.borrow_rate_per_hour,
-        utilization_bps(
-            u128::from(pool.reserved_quote),
-            u128::from(pool.quote_deposited),
+    let elapsed = u64::try_from(raw.max(0)).map_err(|_| PerpsError::MathOverflow)?;
+    let dt = if migrated {
+        elapsed
+    } else {
+        elapsed.min(u64::from(market.max_settle_window_seconds))
+    };
+    let accrual = if migrated {
+        let utilization_seconds = pool
+            .utilization_integral
+            .checked_sub(market.borrow_utilization_checkpoint)
+            .ok_or(PerpsError::MathOverflow)?;
+        borrow_index_delta_from_integral(
+            market.borrow_rate_per_hour,
+            utilization_seconds,
+            market.borrow_remainder_carry,
         )
-        .map_err(crate::oracle::map_risk_error)?,
-        dt,
-        market.borrow_remainder_carry,
-    )
+    } else {
+        borrow_index_delta(
+            market.borrow_rate_per_hour,
+            utilization_bps(
+                u128::from(pool.reserved_quote),
+                u128::from(pool.quote_deposited),
+            )
+            .map_err(crate::oracle::map_risk_error)?,
+            dt,
+            market.borrow_remainder_carry,
+        )
+    }
     .map_err(crate::oracle::map_risk_error)?;
     market.cum_borrow_index = market
         .cum_borrow_index
         .checked_add(accrual.index_delta)
         .ok_or(PerpsError::MathOverflow)?;
     market.borrow_remainder_carry = accrual.remainder;
-
-    // Funding accrues at the **last sampled** rate across the whole interval.
-    market.cum_funding_index = market
-        .cum_funding_index
-        .checked_add(
-            funding_index_delta(market.sampled_funding_rate_per_hour, dt)
-                .map_err(crate::oracle::map_risk_error)?,
+    if migrated {
+        market.borrow_utilization_checkpoint = pool.utilization_integral;
+        let funding = funding_index_delta_with_carry(
+            market.sampled_funding_rate_per_hour,
+            dt,
+            market.funding_remainder_carry,
         )
-        .ok_or(PerpsError::MathOverflow)?;
+        .map_err(crate::oracle::map_risk_error)?;
+        market.cum_funding_index = market
+            .cum_funding_index
+            .checked_add(funding.index_delta)
+            .ok_or(PerpsError::MathOverflow)?;
+        market.funding_remainder_carry = funding.remainder;
+    } else {
+        market.cum_funding_index = market
+            .cum_funding_index
+            .checked_add(
+                funding_index_delta(market.sampled_funding_rate_per_hour, dt)
+                    .map_err(crate::oracle::map_risk_error)?,
+            )
+            .ok_or(PerpsError::MathOverflow)?;
+    }
 
-    // Resample on interval only. Accrual is continuous; only the rate is
-    // stepwise. Throttling accrual itself would make what a position owes depend
-    // on how often somebody happened to call settle.
-    //
-    // No second lower clamp is needed on this subtraction: `last_rate_sample_ts`
-    // is never written alone — it is only ever set to the same `now` that
-    // `last_settle_ts` is — so it is always at most `last_settle_ts`, and
-    // `raw > 0` is already proven above.
     let since_sample = now
         .checked_sub(market.last_rate_sample_ts)
         .ok_or(PerpsError::MathOverflow)?;
@@ -898,16 +936,15 @@ pub(crate) fn accrue(market: &mut Market, pool: &Pool, clock: &Clock) -> Result<
         .map_err(crate::oracle::map_risk_error)?;
         market.last_rate_sample_ts = now;
     }
-
-    market.last_settle_ts = now;
+    market.last_settle_ts = market.last_settle_ts.max(now);
     Ok(Some(dt))
 }
 
 pub fn handle_settle_market(ctx: Context<SettleMarket>) -> Result<()> {
     let clock = Clock::get()?;
-    let Some(dt) = accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)? else {
-        // Idempotent. A keeper calling twice in a slot, or a cluster clock
-        // revised backwards, writes nothing and announces nothing.
+    let Some(dt) = accrue(&mut ctx.accounts.market, &mut ctx.accounts.pool, &clock)? else {
+        // No market accrual event. An empty market may have initialized its
+        // checkpoint, or this call may have advanced the pool's history.
         return Ok(());
     };
 
@@ -1024,17 +1061,14 @@ pub(crate) fn clamp_to_ema_band(
 
 pub fn handle_refresh_market_price(ctx: Context<RefreshMarketPrice>) -> Result<()> {
     let clock = Clock::get()?;
-    let (price, ema) = crate::oracle::load_price_and_ema(
+    let price = crate::oracle::load_price(
         &ctx.accounts.price_update,
         &ctx.accounts.market.feed_id,
         &ctx.accounts.market.trading_guards(),
         &clock,
     )?;
-    let clamped = clamp_to_ema_band(&price, ema, ctx.accounts.market.max_divergence_bps)?;
-
     let market = &mut ctx.accounts.market;
-    market.last_good_price = clamped.mid;
-    market.last_good_price_ts = clock.unix_timestamp;
+    crate::oracle::record_strict_price(market, &price);
 
     emit!(MarketPriceRefreshed {
         market: market.key(),
@@ -1121,6 +1155,9 @@ pub struct CreateMarket<'info> {
 /// Accounts for [`crate::sakura_perps::set_risk_params`].
 #[derive(Accounts)]
 pub struct SetRiskParams<'info> {
+    #[account(mut, seeds = [b"pool"], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+
     #[account(seeds = [b"exchange"], bump = exchange.bump)]
     pub exchange: Box<Account<'info, Exchange>>,
 
@@ -1134,9 +1171,8 @@ pub struct SetRiskParams<'info> {
 /// Accounts for [`crate::sakura_perps::settle_market`].
 #[derive(Accounts)]
 pub struct SettleMarket<'info> {
-    /// Read-only, and required: borrow accrual is a function of pool-wide
-    /// utilisation.
-    #[account(seeds = [b"pool"], bump = pool.bump)]
+    /// Checkpoints pool-wide utilization before this market consumes it.
+    #[account(mut, seeds = [b"pool"], bump = pool.bump)]
     pub pool: Box<Account<'info, Pool>>,
 
     #[account(mut, seeds = [b"market", market.feed_id.as_ref()], bump = market.bump)]
@@ -1215,7 +1251,7 @@ pub struct MarketSettled {
     pub cum_funding_index: i128,
     pub sampled_funding_rate_per_hour: i128,
     pub last_settle_ts: i64,
-    /// The **clamped** Δt actually accrued, not the wall-clock gap.
+    /// Elapsed time accrued; only legacy drain-only markets retain the old cap.
     pub dt: u64,
 }
 
@@ -1254,7 +1290,10 @@ pub(crate) mod tests {
             withdraw_delay_seconds: 60,
             max_utilization_bps: crate::M5_MAX_UTILIZATION_BPS,
             max_aum_quote: u64::MAX,
-            _reserved: [0u8; 128],
+            utilization_integral: 0,
+            utilization_last_ts: 1_700_000_000,
+            utilization_initialized: true,
+            _reserved: [0u8; 103],
         }
     }
 
@@ -1321,7 +1360,11 @@ pub(crate) mod tests {
             last_good_price_ts: 0,
             risk_revision: 0,
             next_position_id: 0,
-            _reserved: [0u8; 80],
+            last_good_price_source: 0,
+            borrow_utilization_checkpoint: 0,
+            borrow_integral_initialized: true,
+            funding_remainder_carry: 0,
+            _reserved: [0u8; 54],
         }
     }
 
@@ -1354,7 +1397,7 @@ pub(crate) mod tests {
     /// backwards, so the next honest call would re-charge the whole gap.
     #[test]
     fn a_backwards_clock_accrues_nothing_and_writes_nothing() {
-        let pool = test_pool(1_000_000_000, 100_000_000);
+        let mut pool = test_pool(1_000_000_000, 100_000_000);
         let mut market = test_market();
         // Something to lose: a rate, a carry, and indices already advanced.
         market.cum_borrow_index = 12_345;
@@ -1373,7 +1416,7 @@ pub(crate) mod tests {
         for revision in [-1i64, -60, -86_400, -1_700_000_000] {
             let clock = clock_at(market.last_settle_ts + revision);
             assert_eq!(
-                accrue(&mut market, &pool, &clock).unwrap(),
+                accrue(&mut market, &mut pool, &clock).unwrap(),
                 None,
                 "a backwards clock must accrue nothing"
             );
@@ -1394,23 +1437,21 @@ pub(crate) mod tests {
         // The same instant is the keeper-calls-twice case, and it is also a
         // no-op rather than a zero-length accrual that still writes.
         let clock = clock_at(market.last_settle_ts);
-        assert_eq!(accrue(&mut market, &pool, &clock).unwrap(), None);
+        assert_eq!(accrue(&mut market, &mut pool, &clock).unwrap(), None);
     }
 
-    /// Δt is clamped to the settle window, so an unattended market cannot charge
-    /// a month in one jump against a utilisation figure from its far end.
+    /// Recorded utilization makes the full historical interval chargeable.
     #[test]
-    fn a_long_gap_accrues_only_the_settle_window() {
-        let pool = test_pool(1_000_000_000, 200_000_000);
+    fn a_long_gap_accrues_the_full_elapsed_interval() {
+        let mut pool = test_pool(1_000_000_000, 200_000_000);
         let mut market = test_market();
         let start = market.last_settle_ts;
         let clock = clock_at(start + 30 * 24 * 60 * 60);
 
-        let dt = accrue(&mut market, &pool, &clock).unwrap().unwrap();
-        assert_eq!(dt, u64::from(market.max_settle_window_seconds));
-        // The timestamp still advances to *now*: the clamp bounds what is
-        // charged, not what has elapsed. Otherwise the unaccrued remainder would
-        // be charged by the next call, defeating the clamp entirely.
+        let dt = accrue(&mut market, &mut pool, &clock).unwrap().unwrap();
+        assert_eq!(dt, 30 * 24 * 60 * 60);
+        assert_eq!(market.cum_borrow_index, 14_400_000);
+        // The deprecated window no longer discards the other 719 hours.
         assert_eq!(market.last_settle_ts, clock.unix_timestamp);
     }
 
@@ -1421,15 +1462,16 @@ pub(crate) mod tests {
     /// floored to zero while the single call accrued 3 590.
     #[test]
     fn settle_cadence_does_not_change_what_borrow_accrues() {
-        let pool = test_pool(1_000_000_000, 35_900_000);
+        let mut pool = test_pool(1_000_000_000, 35_900_000);
 
         let mut once = test_market();
         let start = once.last_settle_ts;
-        accrue(&mut once, &pool, &clock_at(start + 3_600)).unwrap();
+        accrue(&mut once, &mut pool, &clock_at(start + 3_600)).unwrap();
 
         let mut often = test_market();
+        let mut pool = test_pool(1_000_000_000, 35_900_000);
         for second in 1..=3_600i64 {
-            accrue(&mut often, &pool, &clock_at(start + second)).unwrap();
+            accrue(&mut often, &mut pool, &clock_at(start + second)).unwrap();
         }
 
         assert_eq!(once.cum_borrow_index, often.cum_borrow_index);
@@ -1437,6 +1479,127 @@ pub(crate) mod tests {
             once.cum_borrow_index > 0,
             "non-vacuous: something must have accrued"
         );
+    }
+
+    #[test]
+    fn global_utilization_history_cannot_be_repriced_by_another_market() {
+        let mut pool = test_pool(1_000_000_000, 200_000_000);
+        let mut untouched = test_market();
+        let start = untouched.last_settle_ts;
+        let mut changing = test_market();
+        // The changing market checkpoints the old 20% ratio before releasing
+        // half the pool reserve. The untouched market is never cranked here.
+        accrue(&mut changing, &mut pool, &clock_at(start + 3_600)).unwrap();
+        pool.reserved_quote = 100_000_000;
+        accrue(&mut untouched, &mut pool, &clock_at(start + 7_200)).unwrap();
+        assert_eq!(pool.utilization_integral, 10_800_000);
+        assert_eq!(untouched.cum_borrow_index, 30_000);
+        // Repricing the whole interval at the terminal 10% would charge 20_000.
+        assert_ne!(untouched.cum_borrow_index, 20_000);
+    }
+
+    #[test]
+    fn borrow_rate_change_applies_only_after_its_checkpoint() {
+        let mut pool = test_pool(1_000_000_000, 100_000_000);
+        let mut market = test_market();
+        let start = market.last_settle_ts;
+        accrue(&mut market, &mut pool, &clock_at(start + 3_600)).unwrap();
+        market.borrow_rate_per_hour *= 2;
+        accrue(&mut market, &mut pool, &clock_at(start + 7_200)).unwrap();
+        assert_eq!(market.cum_borrow_index, 30_000);
+    }
+
+    #[test]
+    fn legacy_exposure_drains_before_integral_activation() {
+        let mut pool = test_pool(1_000_000_000, 100_000_000);
+        pool.utilization_initialized = false;
+        pool.locked_quote = 100_000_000;
+        let mut market = test_market();
+        market.borrow_integral_initialized = false;
+        market.long_positions = 1;
+        market.long_oi_usd = 1_000 * USD_SCALE;
+        market.locked_quote = pool.locked_quote;
+        market.reserved_quote = pool.reserved_quote;
+        let start = market.last_settle_ts;
+        assert_eq!(
+            accrue(&mut market, &mut pool, &clock_at(start + 7_200)).unwrap(),
+            Some(3_600)
+        );
+        assert_eq!(market.cum_borrow_index, 10_000);
+        assert!(!pool.utilization_initialized);
+        assert!(!market.borrow_integral_initialized);
+        pool.locked_quote = 0;
+        pool.reserved_quote = 0;
+        assert!(crate::pool::checkpoint_utilization(&mut pool, &clock_at(start + 7_200)).unwrap());
+        assert_eq!(pool.utilization_integral, 0);
+        // A supposedly active legacy market cannot be silently attached to an
+        // already migrated pool; no synthetic history is invented.
+        assert!(accrue(&mut market, &mut pool, &clock_at(start + 7_200)).is_err());
+        market.long_positions = 0;
+        market.long_oi_usd = 0;
+        market.locked_quote = 0;
+        market.reserved_quote = 0;
+        assert_eq!(
+            accrue(&mut market, &mut pool, &clock_at(start + 7_200)).unwrap(),
+            None
+        );
+        assert!(market.borrow_integral_initialized);
+        assert_eq!(market.cum_borrow_index, 10_000);
+    }
+
+    #[test]
+    fn a_new_market_starts_at_the_current_integral_without_historical_debt() {
+        let mut pool = test_pool(1_000_000_000, 200_000_000);
+        let mut market = test_market();
+        market.borrow_integral_initialized = false;
+        let start = market.last_settle_ts;
+        accrue(&mut market, &mut pool, &clock_at(start + 3_600)).unwrap();
+        assert_eq!(market.borrow_utilization_checkpoint, 7_200_000);
+        assert_eq!(market.cum_borrow_index, 0);
+        accrue(&mut market, &mut pool, &clock_at(start + 7_200)).unwrap();
+        assert_eq!(market.cum_borrow_index, 20_000);
+    }
+
+    #[test]
+    fn borrow_retune_consumes_history_even_before_a_new_markets_creation_clock() {
+        let mut pool = test_pool(1_000_000_000, 100_000_000);
+        let mut market = test_market();
+        let start = market.last_settle_ts;
+        market.last_settle_ts += 60;
+        market.last_rate_sample_ts += 60;
+        market.borrow_integral_initialized = false;
+        // Create at t+60, then activate/open after a clock revision back to t.
+        accrue(&mut market, &mut pool, &clock_at(start)).unwrap();
+        assert_eq!(market.last_settle_ts, start + 60);
+        // Retuning at t+30 must consume this interval under the old rate even
+        // though the independent funding timestamp has not caught up yet.
+        assert_eq!(
+            accrue(&mut market, &mut pool, &clock_at(start + 30)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(market.cum_borrow_index, 83);
+        market.borrow_rate_per_hour *= 2;
+        assert_eq!(
+            accrue(&mut market, &mut pool, &clock_at(start + 60)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(market.cum_borrow_index, 250);
+        assert_eq!(market.borrow_remainder_carry, 0);
+        assert_eq!(market.last_settle_ts, start + 60);
+    }
+
+    #[test]
+    fn market_funding_carry_prevents_frequent_settle_forgiveness() {
+        let mut pool = test_pool(1_000_000_000, 100_000_000);
+        let mut market = test_market();
+        market.sampled_funding_rate_per_hour = -7;
+        market.min_settle_interval_seconds = 3_601;
+        let start = market.last_settle_ts;
+        for second in 1..=3_600 {
+            accrue(&mut market, &mut pool, &clock_at(start + second)).unwrap();
+        }
+        assert_eq!(market.cum_funding_index, -7);
+        assert_eq!(market.funding_remainder_carry, 0);
     }
 
     /// The clamp is symmetric, and it never rejects.

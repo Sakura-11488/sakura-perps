@@ -413,12 +413,10 @@ pub mod sakura_perps {
     /// tighten a market while the protocol is paused, and quarantining it by
     /// setting `max_oi_usd = 0` is the tightest action available.
     ///
-    /// There is no gate on open positions. Every parameter a position depends
-    /// on is snapshotted at open or consumed at open, and the one change that
-    /// could genuinely make a market unclosable — a raised borrow rate — is
-    /// bounded by a ceiling rather than by a gate. A gate would have been worse
-    /// than useless: raising the rate reads as tightening, and lowering it back
-    /// would read as a loosening that the positions it bricked then block.
+    /// Existing exposure does not block a retune. Accrue at the old rates first;
+    /// replacement borrow/funding parameters apply prospectively. New entries
+    /// must sign the resulting risk revision. Position-snapshotted exit terms
+    /// remain unchanged; oracle policy and quarantine retain their live gates.
     pub fn set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -> Result<()> {
         market::handle_set_risk_params(ctx, params)
     }
@@ -432,9 +430,9 @@ pub mod sakura_perps {
     ///
     /// It reads **no oracle**. Requiring a fresh price would make settlement
     /// fail exactly when the oracle is degraded, which is when accrual matters
-    /// most. It does read the pool, because borrow accrues against pool-wide
-    /// utilisation — so borrow is coupled across markets, and opening a position
-    /// in one raises the borrow rate in every other.
+    /// most. It checkpoints the writable canonical pool's historical utilization
+    /// before a market consumes that integral. Borrow is coupled across markets
+    /// prospectively, without repricing elapsed intervals at today's ratio.
     ///
     /// The same routine runs at the head of every position instruction. This one
     /// exists so accrual does not depend on trading activity.
@@ -444,29 +442,20 @@ pub mod sakura_perps {
 
     /// Advances a market's oracle-free settlement reference. Permissionless.
     ///
-    /// Loads under the trading guards, clamps the mid into its own EMA band and
-    /// writes `last_good_price`. Touches no value, moves no tokens, and grants
-    /// the caller nothing.
-    ///
-    /// It exists so that reference cannot be frozen. Without it, an admin could
-    /// pause opening and closing, wait for the market to move, and then
-    /// emergency-close every position at the stale price those two instructions
-    /// had left behind. With it, anyone can advance the reference at any time
-    /// for the cost of one transaction, and freezing it requires the feed itself
-    /// to be dead — in which case `last_good_price` genuinely is the last honest
-    /// price there was. That is why it is neither pausable nor admin-gated.
+    /// Loads under strict trading guards and records a newer raw oracle price
+    /// with its publication time and provenance. Touches no value and moves no
+    /// tokens. Active markets can refresh while trading is paused. Quarantine
+    /// freezes the cache, including against this permissionless instruction.
     pub fn refresh_market_price(ctx: Context<RefreshMarketPrice>) -> Result<()> {
         market::handle_refresh_market_price(ctx)
     }
 
     /// Sets the pool's deposit cap and its utilisation ceiling. Admin-only.
     ///
-    /// `max_utilization_bps` had no setter at all until now — it was written
-    /// once at `initialize_pool` and the live devnet pool was stuck with
-    /// whatever it was given. That matters more than it sounds: the ceiling is
-    /// this milestone's bound on how far an LP share price can be overstated,
-    /// capped at [`M5_MAX_UTILIZATION_BPS`], so leaving it unsettable meant the
-    /// bound could not actually be applied to a running pool.
+    /// `max_utilization_bps` is capped at [`M5_MAX_UTILIZATION_BPS`]. It bounds
+    /// reserved profits relative to pool equity, not LP valuation error or
+    /// omitted trader losses. LP deposits/redemptions separately require a flat
+    /// pool until liability-aware valuation and bounded exits are implemented.
     pub fn set_pool_limits(
         ctx: Context<SetPoolLimits>,
         max_aum_quote: u64,
@@ -559,20 +548,11 @@ pub mod sakura_perps {
 
     /// Winds a position down with **no oracle at all**.
     ///
-    /// This is the exit that has to survive everything else failing, so it takes
-    /// no price account, no feed account and no pause gate, and it settles
-    /// against `market.last_good_price` — a number kept on the market itself by
-    /// every successful price read, including the permissionless
-    /// `refresh_market_price`, precisely so that pausing the trading paths
-    /// cannot freeze it.
-    ///
-    /// Loosening the oracle guards was the alternative and it is not a fix: a
-    /// loosened guard still fails when the oracle is *absent*, and absent is
-    /// what revocation, delisting and an outage all produce.
-    ///
-    /// Two preconditions, both public and both slow: the market must be
-    /// quarantined, and it must have been for a day. A wind-down is therefore
-    /// announced by the chain before any value moves.
+    /// Admin-only, with no price/feed account or pause gate. Requires a strict
+    /// raw oracle snapshot recorded before quarantine and frozen during it.
+    /// Missing or legacy unproven cache fails closed; entry price is not a
+    /// substitute. A valid historical snapshot is not guaranteed economically
+    /// fair at settlement time. The market must have been quarantined for a day.
     pub fn emergency_close_position(ctx: Context<EmergencyClosePosition>) -> Result<()> {
         position::handle_emergency_close_position(ctx)
     }
@@ -1058,4 +1038,10 @@ pub enum PerpsError {
     IntentExpired,
     #[msg("Close intent does not refer to this position generation.")]
     PositionGenerationMismatch,
+    #[msg("Emergency settlement requires a proven strict oracle snapshot; legacy or missing prices cannot be substituted.")]
+    EmergencyPriceUnavailable,
+    #[msg("The legacy pool must settle its open positions before accepting new risk under historical utilization accounting.")]
+    PoolMigrationRequired,
+    #[msg("A market with legacy exposure cannot activate historical utilization accounting.")]
+    MarketMigrationRequired,
 }

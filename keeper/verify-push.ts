@@ -42,7 +42,9 @@ async function main(): Promise<void> {
   console.log(`feed     ${account.toBase58()}`);
   console.log("         (this must equal the market's pinned price_update, or a push is useless)");
 
-  const before = await readPriceAge(ctx.connection, account, await clusterNow(ctx.connection));
+  const now = await clusterNow(ctx.connection);
+  const clusterTimeObservedAt = performance.now();
+  const before = await readPriceAge(ctx.connection, account, now);
   if (!before) throw new Error("price account does not exist");
   console.log(
     `\nbefore   publish_time ${before.view.publishTime}  posted_slot ${before.view.postedSlot}` +
@@ -50,7 +52,11 @@ async function main(): Promise<void> {
   );
   console.log(`         price ${before.view.price} x 10^${before.view.exponent}`);
 
-  const ixs = await updater.buildPushInstructions(SOL_USD, before.view.publishTime);
+  const ixs = await updater.buildPushInstructions(
+    SOL_USD,
+    before.view.publishTime,
+    () => now.unix + Math.floor((performance.now() - clusterTimeObservedAt) / 1000),
+  );
   if (!ixs) {
     console.log("\nHermes has nothing newer than what is already on chain. Try again shortly.");
     console.log("This is not a failure — it is the guard that stops a non-newer push reverting.");

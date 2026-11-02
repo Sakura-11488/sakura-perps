@@ -131,17 +131,16 @@ pub struct Pool {
     /// Hard cap on `quote_deposited`. Essential on the way to mainnet: it bounds
     /// what can be lost while the protocol is still unproven.
     pub max_aum_quote: u64,
-    /// 128 originally, then 120 while a `min_liquidity_quote: u64` sat here.
-    ///
-    /// Those eight bytes were returned to the reserve rather than left
-    /// declared-and-unused. The field was never written and never read: the real
-    /// floor is [`sakura_perps_risk::pool::MINIMUM_LIQUIDITY`], a crate constant
-    /// consumed inside `shares_for_deposit`. A field whose name promises a
-    /// configurable minimum that does not exist is worse than no field at all —
-    /// an operator sets it, observes nothing, and concludes the floor is off.
-    /// `INIT_SPACE` is unchanged, and the live devnet pool already reads zero in
-    /// those bytes, so nothing changes on chain.
-    pub _reserved: [u8; 128],
+    /// Integral of floored utilization basis points over elapsed seconds.
+    /// Every exposure mutation checkpoints the old ratio before changing it.
+    pub utilization_integral: u128,
+    /// Monotonic clock high-water mark for the integral.
+    pub utilization_last_ts: i64,
+    /// Legacy pools activate only after all old claims have settled. Missing
+    /// historical exposure is never reconstructed from a caller-selected ratio.
+    pub utilization_initialized: bool,
+    /// New accounting fields consume reserved bytes; account length is fixed.
+    pub _reserved: [u8; 103],
 }
 
 /// A pending withdrawal. Created by `request_withdraw`, consumed by `lp_withdraw`.
@@ -216,6 +215,7 @@ pub fn handle_initialize_pool(
     pool.withdraw_delay_seconds = params.withdraw_delay_seconds;
     pool.max_utilization_bps = params.max_utilization_bps;
     pool.max_aum_quote = params.max_aum_quote;
+    checkpoint_utilization(pool, &Clock::get()?)?;
 
     emit!(PoolInitialized {
         pool: pool.key(),
@@ -235,6 +235,7 @@ pub fn handle_lp_deposit(ctx: Context<LpDeposit>, amount: u64, min_shares_out: u
     );
     require!(amount > 0, PerpsError::ZeroAmount);
     assert_lp_valuation_available(&ctx.accounts.pool)?;
+    checkpoint_utilization(&mut ctx.accounts.pool, &Clock::get()?)?;
 
     // Measure what actually arrived rather than trusting the requested amount.
     // A Token-2022 mint with a transfer fee delivers less than was sent, and
@@ -421,6 +422,7 @@ pub fn handle_lp_withdraw(ctx: Context<LpWithdraw>, min_amount_out: u64) -> Resu
     assert_lp_valuation_available(&ctx.accounts.pool)?;
 
     let clock = Clock::get()?;
+    checkpoint_utilization(&mut ctx.accounts.pool, &clock)?;
     let request = &ctx.accounts.withdraw_request;
 
     // Both clocks. The timestamp is the policy; the slot check additionally
@@ -596,6 +598,43 @@ fn assert_lp_valuation_available(pool: &Pool) -> Result<()> {
         PerpsError::LpValuationUnavailable
     );
     Ok(())
+}
+
+/// Integrate the current pool ratio before any instruction changes equity or
+/// reserves. Repeated calls at one timestamp are harmless. A backwards clock
+/// never rewinds the high-water mark or charges an interval twice.
+///
+/// An active legacy book cannot be migrated accurately: its exposure history
+/// was never recorded. It remains on the legacy exit path with new opens
+/// disabled until collateral and reserves both reach zero.
+pub(crate) fn checkpoint_utilization(pool: &mut Pool, clock: &Clock) -> Result<bool> {
+    if !pool.utilization_initialized {
+        if pool.locked_quote != 0 || pool.reserved_quote != 0 {
+            return Ok(false);
+        }
+        pool.utilization_integral = 0;
+        pool.utilization_last_ts = clock.unix_timestamp;
+        pool.utilization_initialized = true;
+        return Ok(true);
+    }
+    if clock.unix_timestamp <= pool.utilization_last_ts {
+        return Ok(true);
+    }
+    let elapsed = clock
+        .unix_timestamp
+        .checked_sub(pool.utilization_last_ts)
+        .ok_or(PerpsError::MathOverflow)? as u128;
+    let utilization = risk_pool::utilization_bps(
+        u128::from(pool.reserved_quote),
+        u128::from(pool.quote_deposited),
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+    pool.utilization_integral = utilization
+        .checked_mul(elapsed)
+        .and_then(|delta| pool.utilization_integral.checked_add(delta))
+        .ok_or(PerpsError::MathOverflow)?;
+    pool.utilization_last_ts = clock.unix_timestamp;
+    Ok(true)
 }
 
 /// What the pool has recorded that it owes: liquidity-provider equity, trader

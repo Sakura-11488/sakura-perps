@@ -639,35 +639,21 @@ impl SettledQuote {
     }
 }
 
-/// The price `emergency_close_position` settles against, and where it comes
-/// from.
+/// A historical strict spot, frozen when this market enters quarantine.
 ///
-/// `market.last_good_price` is written by every successful guard-passing price
-/// read — the two trading paths, the admin settlement, and the permissionless
-/// `refresh_market_price`. It is read out of the `Market` account rather than
-/// from an oracle, which is the whole of the design: **no price account is
-/// passed to that instruction**, so no guard, no staleness and no revoked feed
-/// can gate it. Loosening guards was the alternative and it is not a fix — a
-/// loosened guard still fails when the oracle is *absent*, and absent is what
-/// revocation, delisting and an outage all produce.
-///
-/// Zero means the market has never priced anything, which is reachable: a
-/// market can be created, activated, traded into, and quarantined again without
-/// `last_good_price` ever having been written by a build that predates it. The
-/// position's own entry price is then the reference. It is not a market price,
-/// but it is a price this exact position genuinely transacted at, and the
-/// alternative — refusing to settle — is the trap the instruction exists to
-/// avoid.
-///
-/// Either way the result is non-zero, which is what makes `execution_price`
-/// total on that path: an entry price is struck by `execution_price` itself,
-/// which never returns zero.
-fn emergency_reference_price(market: &Market, position: &Position) -> u128 {
-    if market.last_good_price > 0 {
-        market.last_good_price
-    } else {
-        position.entry_price
-    }
+/// No current freshness gate is applied: this path explicitly settles at the
+/// cached historical reference after the public delay, under administrator
+/// authority. It is not a claim about current fair value. Legacy/unproven or
+/// missing caches fail closed; a position's entry price is not a shared market
+/// settlement price. Such markets need an active strict refresh before being
+/// quarantined, and a permanent outage before that remains an unresolved exit.
+fn emergency_reference_price(market: &Market) -> Result<u128> {
+    require!(
+        market.last_good_price_source == crate::oracle::STRICT_PRICE_SOURCE_VERSION
+            && market.last_good_price > 0,
+        PerpsError::EmergencyPriceUnavailable
+    );
+    Ok(market.last_good_price)
 }
 
 pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionParams) -> Result<()> {
@@ -713,7 +699,13 @@ pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionPara
     // 2. Accrue first, so both indices are current before they are snapshotted.
     //    Snapshotting a stale index would silently forgive the position every
     //    unaccrued second between the last settle and this open.
-    crate::market::accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)?;
+    crate::market::accrue(&mut ctx.accounts.market, &mut ctx.accounts.pool, &clock)?;
+    // Legacy pool utilization cannot be reconstructed from live balances.
+    // Existing claims must settle before the cumulative engine admits new risk.
+    require!(
+        ctx.accounts.pool.utilization_initialized,
+        PerpsError::PoolMigrationRequired
+    );
 
     // 3. Price, with divergence **rejected**. Opening is the one leg where
     //    refusing is a safe default: there is no position yet to trap, so a spot
@@ -730,8 +722,7 @@ pub fn handle_open_position(ctx: Context<OpenPosition>, params: OpenPositionPara
             .map_err(crate::oracle::map_risk_error)?,
         PerpsError::PriceDiverged
     );
-    ctx.accounts.market.last_good_price = price.price;
-    ctx.accounts.market.last_good_price_ts = clock.unix_timestamp;
+    crate::oracle::record_strict_price(&mut ctx.accounts.market, &price);
 
     // 4. Execution price: adverse to the trader on the confidence interval and
     //    on the spread, both. The oracle publishes an interval and not a point,
@@ -963,7 +954,7 @@ pub fn handle_close_position(
     require!(params.limit_price > 0, PerpsError::SlippageExceeded);
 
     // 2. Accrue, so the indices this close settles against are current.
-    crate::market::accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)?;
+    crate::market::accrue(&mut ctx.accounts.market, &mut ctx.accounts.pool, &clock)?;
 
     // 3. Price, **clamped** into the EMA band in both directions and never
     //    rejected. A rejection at exit is a trap that is most valuable to a
@@ -986,8 +977,7 @@ pub fn handle_close_position(
     let clamped =
         crate::market::clamp_to_ema_band(&price, ema, ctx.accounts.market.max_divergence_bps)?;
     let mid = clamped.mid;
-    ctx.accounts.market.last_good_price = mid;
-    ctx.accounts.market.last_good_price_ts = clock.unix_timestamp;
+    crate::oracle::record_strict_price(&mut ctx.accounts.market, &price);
 
     // 4. Execution price, off the position's **snapshotted** spread and not the
     //    market's live one. Reading it live would let an admin retroactively tax
@@ -1052,6 +1042,10 @@ pub fn handle_close_position(
         protocol_fee_share_bps,
         0,
     )?;
+    // This can activate the new utilization clock when the final legacy claim
+    // leaves. For an initialized pool, the pre-mutation accrual already charged
+    // the elapsed interval and this same-clock checkpoint adds nothing.
+    crate::pool::checkpoint_utilization(&mut ctx.accounts.pool, &clock)?;
 
     // 10. Transfer, then announce, then assert. The order matters: I1 compares
     //     the vault balance against recorded liabilities, so asserting it before
@@ -1111,7 +1105,7 @@ pub fn handle_admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result
     // 2. Accrue. Funding and borrow are inputs to the equity the liquidatability
     //    gate reads, so settling against stale indices would judge the position
     //    solvent on money it already owes.
-    crate::market::accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)?;
+    crate::market::accrue(&mut ctx.accounts.market, &mut ctx.accounts.pool, &clock)?;
 
     // 3. Price under the **liquidation** guards, which `validate_guard_ordering`
     //    permits to be the looser of the two. Refusing to liquidate is not a
@@ -1134,14 +1128,8 @@ pub fn handle_admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result
         crate::market::clamp_to_ema_band(&price, ema, ctx.accounts.market.max_divergence_bps)?;
     let mid = clamped.mid;
 
-    // Recorded as the market's last good price even though the guards it passed
-    // were the looser set. The alternative — writing it only from the trading
-    // paths — leaves `emergency_close_position` settling against a *staler*
-    // reference rather than a tighter one, and staleness is the failure mode
-    // that matters for a number with no freshness gate on it. This price is one
-    // the market genuinely transacted at, clamped into its own EMA band.
-    ctx.accounts.market.last_good_price = mid;
-    ctx.accounts.market.last_good_price_ts = clock.unix_timestamp;
+    // A liquidation observation may fail the stricter trading guards. It never
+    // changes the proven emergency reference, even when this liquidation succeeds.
 
     // 4. Execution price off the position's **snapshotted** spread. The rule
     //    bites harder here than anywhere else: this is the one exit an admin
@@ -1251,6 +1239,10 @@ pub fn handle_admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result
         protocol_fee_share_bps,
         0,
     )?;
+    // This can activate the new utilization clock when the final legacy claim
+    // leaves. For an initialized pool, the pre-mutation accrual already charged
+    // the elapsed interval and this same-clock checkpoint adds nothing.
+    crate::pool::checkpoint_utilization(&mut ctx.accounts.pool, &clock)?;
 
     pay_owner(
         &ctx.accounts.pool,
@@ -1287,8 +1279,8 @@ pub fn handle_admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result
 
 /// Wind a position down with **no oracle at all**.
 ///
-/// The instruction's job is to be the exit that still works when nothing else
-/// does, so every one of its properties is an absence:
+/// This historical-price exit requires proven cached state and the quarantine
+/// delay. It does not need a live oracle account:
 ///
 /// * **No price account.** Not looser guards — a loosened guard still fails when
 ///   the oracle is *absent*, and absent is what a revoked feed, a delisting and
@@ -1300,10 +1292,10 @@ pub fn handle_admin_settle_position(ctx: Context<AdminSettlePosition>) -> Result
 ///   `pool.rs`, and it is stronger here.
 /// * **No quarantine objection** — it *requires* the quarantine.
 ///
-/// What it is not is a cheaper exit. Funding and borrow accrue, the close fee is
-/// charged on `settle_close`'s clamp, and the position's own spread is applied
-/// adversely, so an admin has no reason to prefer this path and a trader has no
-/// reason to hope for it.
+/// The administrator chooses when to invoke historical-price settlement after
+/// the delay. Funding, borrow, snapshotted spread and close fees still apply.
+/// Those charges do not make the historical price equivalent to current value;
+/// governance timing remains an economic trust assumption.
 pub fn handle_emergency_close_position(ctx: Context<EmergencyClosePosition>) -> Result<()> {
     let clock = Clock::get()?;
     let collateral_decimals = ctx.accounts.exchange.collateral_decimals;
@@ -1323,21 +1315,21 @@ pub fn handle_emergency_close_position(ctx: Context<EmergencyClosePosition>) -> 
         quarantined_for >= EMERGENCY_CLOSE_DELAY_SECONDS,
         PerpsError::EmergencyCloseTooSoon
     );
+    let reference = emergency_reference_price(&ctx.accounts.market)?;
 
     // Accrual reads no oracle, so the indices are as current on this path as on
     // any other and there is no reason to forgive what the position owes.
     // Forgiving it would make an emergency close cheaper than an ordinary one,
     // which is a reason to quarantine a market rather than a reason not to.
-    crate::market::accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)?;
+    crate::market::accrue(&mut ctx.accounts.market, &mut ctx.accounts.pool, &clock)?;
 
     // The settlement price, read from the `Market` account. See
     // [`emergency_reference_price`]. Confidence is passed as zero because there
     // is none to read — no oracle was consulted — and the spread is the
-    // position's snapshot, so the exit is adverse to the trader exactly as an
-    // ordinary close would be. `execution_price` is total here: the reference is
+    // position's snapshot. This historical-price policy differs from a live
+    // close, including its omitted confidence band. The reference is
     // non-zero and `0 + spread_bps <= MAX_SPREAD_BPS < BPS_DENOMINATOR`, so the
     // one branch that can refuse a price cannot be reached.
-    let reference = emergency_reference_price(&ctx.accounts.market, &ctx.accounts.position);
     let side = ctx.accounts.position.risk_side();
     let exit_price = execution_price(
         side,
@@ -1386,6 +1378,10 @@ pub fn handle_emergency_close_position(ctx: Context<EmergencyClosePosition>) -> 
         protocol_fee_share_bps,
         0,
     )?;
+    // This can activate the new utilization clock when the final legacy claim
+    // leaves. For an initialized pool, the pre-mutation accrual already charged
+    // the elapsed interval and this same-clock checkpoint adds nothing.
+    crate::pool::checkpoint_utilization(&mut ctx.accounts.pool, &clock)?;
 
     pay_owner(
         &ctx.accounts.pool,
@@ -1628,9 +1624,9 @@ pub struct AdminSettlePosition<'info> {
 /// Accounts for [`crate::sakura_perps::emergency_close_position`].
 ///
 /// [`AdminSettlePosition`]'s, minus the `price_update`, plus the quarantine
-/// constraint. **The absence of the price account is the instruction**: there is
-/// nothing here an oracle outage, a revoked feed or a widened confidence band
-/// can gate, because there is no oracle account to gate.
+/// constraint. A live oracle outage cannot block this path once a strict cache
+/// was established before quarantine. Missing or legacy provenance still fails
+/// explicitly; the absence of a price account does not manufacture a reference.
 #[derive(Accounts)]
 pub struct EmergencyClosePosition<'info> {
     #[account(seeds = [b"exchange"], bump = exchange.bump)]
@@ -1823,7 +1819,7 @@ pub fn handle_liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> 
 
     // 2. Accrue before judging solvency, or the gate reads an equity that ignores
     //    money the position already owes.
-    crate::market::accrue(&mut ctx.accounts.market, &ctx.accounts.pool, &clock)?;
+    crate::market::accrue(&mut ctx.accounts.market, &mut ctx.accounts.pool, &clock)?;
 
     // 3. Liquidation guards, clamped into the EMA band. Refusing to liquidate is
     //    not a safe default: a position the pool cannot close is one it
@@ -1838,8 +1834,7 @@ pub fn handle_liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> 
         crate::market::clamp_to_ema_band(&price, ema, ctx.accounts.market.max_divergence_bps)?;
     let mid = clamped.mid;
 
-    ctx.accounts.market.last_good_price = mid;
-    ctx.accounts.market.last_good_price_ts = clock.unix_timestamp;
+    // Looser liquidation observations never update the strict emergency cache.
 
     // 4. The position's snapshotted spread, not the market's live one. It matters
     //    more here than anywhere: the caller is a stranger who profits from this
@@ -1937,6 +1932,10 @@ pub fn handle_liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> 
         protocol_fee_share_bps,
         keeper_fee_quote,
     )?;
+    // This can activate the new utilization clock when the final legacy claim
+    // leaves. For an initialized pool, the pre-mutation accrual already charged
+    // the elapsed interval and this same-clock checkpoint adds nothing.
+    crate::pool::checkpoint_utilization(&mut ctx.accounts.pool, &clock)?;
 
     // 8. The trader first, then the keeper. The order is not cosmetic: the
     //    trader's payout is an obligation and the keeper's is a fee, so if the
@@ -2435,31 +2434,27 @@ mod tests {
         );
     }
 
-    /// The emergency reference is the market's last good price, falling back to
-    /// the position's own entry price when the market has never priced anything.
+    /// Entry price is not a shared settlement mark, including for legacy state.
     #[test]
-    fn the_emergency_reference_falls_back_to_the_entry_price() {
+    fn the_emergency_reference_requires_strict_nonzero_provenance() {
         let mut market = test_market();
-        let open = opened(SIDE_LONG, &market);
-
-        assert_eq!(market.last_good_price, 0, "a market that never priced");
-        assert_eq!(
-            emergency_reference_price(&market, &open.position),
-            open.position.entry_price
-        );
-
+        assert!(emergency_reference_price(&market).is_err());
         market.last_good_price = 137 * PRICE_SCALE;
+        assert!(emergency_reference_price(&market).is_err());
+        market.last_good_price_source = crate::oracle::STRICT_PRICE_SOURCE_VERSION;
         assert_eq!(
-            emergency_reference_price(&market, &open.position),
+            emergency_reference_price(&market).unwrap(),
             137 * PRICE_SCALE
         );
+        market.last_good_price = 0;
+        assert!(emergency_reference_price(&market).is_err());
     }
 
     /// The emergency exit price can always be struck.
     ///
     /// `execution_price` refuses a price outright once `confidence + spread >=
-    /// mid`, and the whole point of `emergency_close_position` is that nothing
-    /// can make it refuse. Confidence is zero there because no oracle was read,
+    /// mid`. Once a proven nonzero reference exists, the emergency arithmetic
+    /// must remain strikeable. Confidence is zero because no oracle was read,
     /// which leaves only the spread — and every legal spread is at most
     /// `MAX_SPREAD_BPS` of the mid, so the adverse adjustment is strictly less
     /// than the mid at every reference price down to one unit. An arithmetic

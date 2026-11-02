@@ -2,9 +2,9 @@
 //!
 //! Both are index-based: the market carries a cumulative value, a position
 //! records the index at the moment it opened, and what is owed is the
-//! difference multiplied by notional. This makes settlement O(1) per position
-//! and — more importantly — makes it impossible to owe a different amount
-//! depending on how often somebody happened to call the settle instruction.
+//! difference multiplied by notional. Settlement is O(1) per position. The
+//! cumulative helpers preserve fractions across partitions of a fixed rate
+//! history; the program separately controls when funding rates are sampled.
 //!
 //! # Why accrual is integrated over elapsed time
 //!
@@ -14,8 +14,8 @@
 //! at. Three further defences belong in the program rather than here: settle at
 //! the head of every open, close and liquidate so `Δt` is always small; enforce
 //! a minimum interval so a settler who has just moved open interest cannot pick
-//! the sampling moment; and cap `Δt` per call so an outage cannot accrue an
-//! unbounded jump.
+//! the sampling moment; and checkpoint utilization before changing exposure.
+//! Elapsed time must not be discarded when a market goes unattended.
 //!
 //! There is also a design constraint worth writing down, because it is easy to
 //! violate by tuning parameters innocently: **round-trip fees must exceed the
@@ -77,13 +77,33 @@ pub fn borrow_index_delta(
     elapsed_seconds: u64,
     carried_remainder: u128,
 ) -> Result<BorrowAccrual, RiskError> {
+    if rate_per_hour == 0 || utilization_bps == 0 || elapsed_seconds == 0 {
+        return Ok(BorrowAccrual {
+            index_delta: 0,
+            remainder: carried_remainder,
+        });
+    }
+    let utilization_seconds = utilization_bps
+        .checked_mul(u128::from(elapsed_seconds))
+        .ok_or(RiskError::MathOverflow)?;
+    borrow_index_delta_from_integral(rate_per_hour, utilization_seconds, carried_remainder)
+}
+
+/// Borrow accrued against the historical integral of utilization in bps-seconds.
+/// The caller checkpoints utilization before changing pool exposure; the rate
+/// applies only across an interval during which that rate was unchanged.
+pub fn borrow_index_delta_from_integral(
+    rate_per_hour: u128,
+    utilization_seconds: u128,
+    carried_remainder: u128,
+) -> Result<BorrowAccrual, RiskError> {
     // `10_000` for basis points, `3_600` for seconds-to-hours. Divided once, at
     // the end, so nothing is truncated mid-computation.
     let denominator = 10_000u128
         .checked_mul(SECONDS_PER_HOUR)
         .ok_or(RiskError::MathOverflow)?;
 
-    if elapsed_seconds == 0 || rate_per_hour == 0 || utilization_bps == 0 {
+    if utilization_seconds == 0 || rate_per_hour == 0 {
         // No accrual, but the carry must survive: zeroing it here would discard
         // value every time utilisation briefly touched zero.
         return Ok(BorrowAccrual {
@@ -93,8 +113,7 @@ pub fn borrow_index_delta(
     }
 
     let numerator = rate_per_hour
-        .checked_mul(utilization_bps)
-        .and_then(|value| value.checked_mul(elapsed_seconds as u128))
+        .checked_mul(utilization_seconds)
         .and_then(|value| value.checked_add(carried_remainder))
         .ok_or(RiskError::MathOverflow)?;
 
@@ -162,14 +181,9 @@ pub fn funding_rate_per_hour(
 /// Signed, at [`RATE_SCALE`]. Truncates toward zero, so neither side gains from
 /// the rounding by choosing which way the rate points.
 ///
-/// This looks like the same shape as [`borrow_index_delta`] and it deliberately
-/// does **not** carry a remainder. The difference is who the money moves
-/// between. Borrow flows from trader to pool, so under-accruing is a loss to the
-/// pool that nobody balances. Funding flows from one side of the market to the
-/// other: both sides read the same index, so truncation shrinks the transfer
-/// symmetrically and nobody profits. Sub-additivity here weakens funding
-/// slightly as a balancing force at very high settle cadence — an economic
-/// tuning question for the rate parameters, not a leak.
+/// Retained for compatibility and legacy drain-only accounts. New accounting
+/// must use [`funding_index_delta_with_carry`]: discarding fractions here can
+/// forgive all funding when a caller settles frequently enough.
 pub fn funding_index_delta(rate_per_hour: i128, elapsed_seconds: u64) -> Result<i128, RiskError> {
     if elapsed_seconds == 0 || rate_per_hour == 0 {
         return Ok(0);
@@ -179,6 +193,41 @@ pub fn funding_index_delta(rate_per_hour: i128, elapsed_seconds: u64) -> Result<
         elapsed_seconds as i128,
         SECONDS_PER_HOUR as i128,
     )
+}
+
+/// Signed funding index accrual with a canonical fractional remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FundingAccrual {
+    /// Whole signed index units accrued in this step.
+    pub index_delta: i128,
+    /// Always in `[0, 3600)`, including when funding changes sign.
+    pub remainder: i64,
+}
+
+/// Integrate funding without forgiving fractions on frequent settlement.
+///
+/// Euclidean division makes the remainder canonical across positive and
+/// negative rates. Truncating each signed step toward zero can otherwise leave
+/// different integer indices for the same rate history after a sign change.
+/// The resulting index is the floor of the integrated rate and differs from
+/// its exact rational value by less than one index unit.
+pub fn funding_index_delta_with_carry(
+    rate_per_hour: i128,
+    elapsed_seconds: u64,
+    carried_remainder: i64,
+) -> Result<FundingAccrual, RiskError> {
+    let denominator = SECONDS_PER_HOUR as i128;
+    if !(0..SECONDS_PER_HOUR as i64).contains(&carried_remainder) {
+        return Err(RiskError::MathOverflow);
+    }
+    let numerator = rate_per_hour
+        .checked_mul(i128::from(elapsed_seconds))
+        .and_then(|value| value.checked_add(i128::from(carried_remainder)))
+        .ok_or(RiskError::MathOverflow)?;
+    Ok(FundingAccrual {
+        index_delta: numerator.div_euclid(denominator),
+        remainder: numerator.rem_euclid(denominator) as i64,
+    })
 }
 
 /// Funding owed by a position. Positive means the trader pays.

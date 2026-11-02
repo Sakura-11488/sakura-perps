@@ -5,6 +5,13 @@ Reviewed 2 November 2026. Baseline Sakura commit:
 `codex/percolator-risk-rooms`. This is source research and prototype development,
 not an audit, on-chain deployment, or claim of worldwide novelty.
 
+**Follow-up:** this report preserves the initial research snapshot and attack
+traces. Subsequent source fixes address historical utilization, funding carry,
+strict recovery-price provenance and bounded Hermes parsing. Use the
+[security challenge guide](../security-challenge.md) for the current target and
+[hardening notes](../security-hardening.md) for remaining gates; the historical
+validation manifest below is not the later challenge build's manifest.
+
 ## Decision
 
 Keep Sakura's isolated, capped, fully reserved position accounting. Borrow

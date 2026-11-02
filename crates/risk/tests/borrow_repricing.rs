@@ -1,10 +1,12 @@
 //! Counterexample to a rejected LP-pricing design, not an allowed instruction
-//! sequence in the hardened program. LP minting now requires no open claims.
+//! sequence in the hardened program. LP minting requires no open claims, and
+//! migrated books now integrate historical utilization before exposure changes.
 //!
 //! A fixed-claim valuation interval `[equity - reserve, equity + collateral]`
 //! does not prove composed safety when a deposit changes the utilization used
-//! to charge an earlier borrow interval. This model documents why the program
-//! must not replace its empty-book gate with conservative bid/ask quotes alone.
+//! to charge an earlier borrow interval. This legacy-model regression records
+//! why share quotes alone could not establish safety; any future LP valuation
+//! design still needs a separate compositional proof under the new accounting.
 
 use sakura_perps_risk::funding::{borrow_index_delta, borrow_owed, fees_dominate_funding};
 use sakura_perps_risk::scale::{BPS_DENOMINATOR, RATE_SCALE, SECONDS_PER_HOUR};
@@ -29,7 +31,7 @@ fn conservative_lp_quotes_do_not_prevent_repricing_past_borrow() {
     let quoted_close_fee = notional / BPS_DENOMINATOR;
     assert_eq!(quoted_close_fee, 100_000);
 
-    // market::accrue feeds the current pool-wide utilization to this function
+    // The legacy accrual model fed terminal pool utilization to this function
     // for the whole elapsed interval. No deposit occurred in the baseline.
     let before_utilization = reserve * BPS_DENOMINATOR / equity;
     let baseline_index = borrow_index_delta(rate, before_utilization, elapsed, 0).unwrap();

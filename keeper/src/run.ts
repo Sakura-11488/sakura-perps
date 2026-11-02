@@ -44,6 +44,7 @@ async function main(): Promise<void> {
     guard.startTick();
     try {
       const now = await clusterNow(ctx.connection);
+      const clusterTimeObservedAt = performance.now();
       // Every tick reconciles old signatures before even considering a new send.
       // An RPC exception leaves the durable pending record and its budget intact.
       for (const result of await reconcilePending(ctx.connection, journal, now.unix)) {
@@ -121,6 +122,7 @@ async function main(): Promise<void> {
                 ? await updater.buildPushInstructions(
                     market.feedId.toString("hex"),
                     age?.view.publishTime ?? null,
+                    () => now.unix + Math.floor((performance.now() - clusterTimeObservedAt) / 1000),
                   )
                 : null;
               // A newer update is required only outside the actual guards; the

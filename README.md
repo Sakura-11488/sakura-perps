@@ -2,7 +2,7 @@
 
 > ### ⚠️ Devnet only. Unaudited. Not for real funds.
 >
-> This program has not been audited, has never held anything of value, and is
+> This program has not been audited, is not approved for real funds, and is
 > incomplete. Do not deploy it to mainnet. Do not send it money.
 
 Permissionless oracle-and-pool perpetual futures on Solana.
@@ -13,12 +13,18 @@ The latest recorded deployment is `devnet-v0.7.0` (2026-08-26).
 A read-only check on 2026-10-29 confirmed that the devnet program exists and is
 executable; it did not re-verify its bytecode or run a trade.
 
+**Security researchers:** start with the [local security challenge](docs/security-challenge.md).
+It includes wallet-free paper tests, a compiled-program simulator, exact build
+manifests, known limitations and reporting requirements. Public launch is pending
+a verified private reporting channel and an assigned responder. There is no
+funded bounty. The shared devnet deployment is not this challenge's target.
+
 | Area | Implemented | Remaining work |
 |---|---|---|
 | Trading | Collateral pools, isolated leveraged positions, owner/admin/emergency closes | Economic hardening and broader operating evidence |
-| Funding and borrow | Index accrual and settlement on position paths | Funding-farm mitigation and settlement cadence |
+| Funding and borrow | Historical pool utilization and full-interval migrated accrual, with funding remainder carry | Legacy-book drain, funding-farm mitigation and economic review |
 | Liquidation | Permissionless on-chain liquidation; exercised on devnet on 2026-08-30 | Insurance and bad-debt recovery; debt is currently recorded |
-| Keeper | Off-chain simulation, oracle-update construction, submission and safety rails | Working price-feed access, a proven pinned-feed refresh, and sustained operation |
+| Keeper | Off-chain simulation, bounded oracle responses, durable submission and spending reservations | Working price-feed access, a proven pinned-feed refresh, and sustained operation |
 | LP accounting | Share mint/burn; new source blocks deposits/redemptions while the pool has open claims | Liability-aware valuation and bounded LP exit; the temporary guard can lock LPs indefinitely |
 | Administration | Admin-gated feed qualification and risk controls; two-step rotation implemented in source | Deploy and rehearse rotation; multisig/timelock governance and audit |
 | Dashboard | Read-only devnet monitor with bounded API errors and explicit unknown observations | Operational validation; reference oracle checks are not live-market acceptance |
@@ -35,6 +41,9 @@ keeper or production readiness.
 submissions and spending reservations, fair scan coverage, truthful dashboard
 status, and two-step admin rotation. These source changes have not been deployed.
 See [security controls, operating notes and remaining gates](docs/security-hardening.md).
+The next source batch adds historical borrow accounting, funding carry,
+strict recovery-price provenance and bounded Hermes parsing. It also remains
+undeployed. Legacy pools must drain before accepting risk under the new engine.
 
 **Product direction:** crypto-native communities, teams, strategy and social
 play. A new [Risk Rooms paper prototype](crates/rooms/README.md) makes the proposed
@@ -479,10 +488,11 @@ unclosable, in a milestone that ships no keeper liquidation. The ledger books
 **No exit that survives a dead feed.** All three close paths originally needed a
 passing oracle read, so a feed that stopped publishing — a delisting, an outage,
 or precisely the revocation the design exists for — trapped every position and
-pinned LP capital behind the utilisation ceiling. `emergency_close_position` now
-takes no price account, no pause gate, and settles from `last_good_price`, which
-a *permissionless* `refresh_market_price` advances so an admin cannot freeze the
-reference by pausing everything else.
+pinned LP capital behind the utilisation ceiling. The original recovery path
+introduced `last_good_price` and a permissionless refresh. The 2026-11-02 source
+now requires a proven strict raw observation and freezes it during quarantine;
+missing legacy provenance fails closed. Historical pricing and permanent-outage
+recovery remain economic policy gates.
 
 **A liquidation fee that could underflow the transfer.** `apply_liquidation_fee`
 clamps twice: against collateral, then against what the close fee left of the
@@ -649,24 +659,26 @@ remains. This is not a guarantee of profitability: the fee clamps to zero on
 sufficiently underwater positions, as the unattended devnet position demonstrated.
 The run proves permissionless liquidation, not sustained automated operation.
 
-#### Settlement cadence protects pool interest revenue
+#### Historical settlement truncation and the source correction
 
-`accrue` clamps its interval: `dt = min(elapsed, max_settle_window_seconds)`,
+The older implementation clamps its interval: `dt = min(elapsed, max_settle_window_seconds)`,
 while `last_settle_ts` still advances to *now*. Elapsed time beyond one window is
-therefore **never charged** — not deferred, forgiven. `settle_market`'s own test
-asserts exactly this: "only the settle window may be charged, never the whole
-gap".
+therefore **never charged** — not deferred, forgiven.
 
 An uncranked market silently under-charges borrow interest, and that shortfall is
 the LPs'. A market with a one-hour window left alone for a day collects one hour
 of interest and writes off twenty-three. A settlement cadence protects pool
 revenue; it is not a prerequisite for a polling keeper to earn a liquidation fee.
-The current keeper does not run a settlement crank.
+The current keeper does not run a settlement crank. In the 2026-11-02 source,
+migrated books instead accrue the full elapsed interval against historical
+utilization, with fractional funding carry. Only the drain-only legacy path
+retains the old truncation. Fresh SVM regressions cover the new behavior.
 
-**Other known limits, pre-mainnet rather than devnet blockers.** A keeper can
-stamp `market.last_good_price` from a price that passed only the looser
-liquidation guards, and `emergency_close_position` settles off that field with no
-freshness gate. Nothing relates `maintenance_margin_bps` to
+**Other limits and source corrections.** Liquidation-grade updates could
+previously stamp `market.last_good_price`. The 2026-11-02 source removes those
+writes, records strict provenance and freezes the cache during quarantine.
+Emergency settlement still uses a historical snapshot with no freshness gate.
+Nothing relates `maintenance_margin_bps` to
 `liquidation_max_confidence_bps + spread_bps`, leaving a band where an owner's own
 `close_position` reverts while a keeper succeeds.
 
@@ -681,7 +693,7 @@ Milestones describe implementation and remaining work, not a completion percenta
 | 3 — oracle validation | Implemented | Keeper-controlled refresh still needs live proof |
 | 4 — collateral vault | Implemented; source restricts LP flows to a settled pool | Liability-aware valuation and bounded LP exits |
 | 5 — positions and isolated margin | Deployed in `devnet-v0.6.0` | Economic hardening |
-| 6 — funding and borrow fees | Accrual and settlement implemented | Funding-farm mitigation and settlement cadence |
+| 6 — funding and borrow fees | Historical utilization and full-interval accrual implemented in source | Legacy drain, funding-farm mitigation and economic review |
 | 7 — liquidation, insurance and bad debt | Partial: liquidation deployed in `devnet-v0.7.0`; bad debt recorded | Insurance/recovery and remaining economic risks |
 | 8 — liquidation keeper | Implemented for devnet; operation not fully demonstrated | Price-feed access, verified refresh, paid automated liquidation and operating history |
 | 9 — TypeScript SDK and app integration | Pending; IDL and internal clients exist | Reusable SDK and a Sakura integration with this program |
@@ -705,7 +717,7 @@ demonstrate a reliably operating devnet market:
    push. Verify that both `publish_time` and `posted_slot` advance.
 3. Exercise a controlled position lifecycle and automated liquidation, verifying
    position closure, the keeper payout, and pool accounting.
-4. Establish settlement cadence and observe the keeper through stale-feed,
+4. Verify historical accrual and observe the keeper through stale-feed,
    healthy-position and failure scenarios.
 
 Before mainnet, deploy and rehearse admin rotation, resolve LP liability valuation,
@@ -715,9 +727,11 @@ No mainnet launch date is established.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md). No audit, no bug bounty yet. Reports are welcome
-at **security@sakuraonseeker.com** and we will not pursue anyone testing in good
-faith against devnet.
+See [SECURITY.md](SECURITY.md). No audit, no bug bounty yet. Private intake must be
+configured before inviting public reports; the previously listed mailbox was
+unverified. The current challenge and good-faith research terms cover your own
+local simulator or validator with simulated assets; they do not authorize attacks
+on shared services or the older devnet deployment.
 
 ## History
 

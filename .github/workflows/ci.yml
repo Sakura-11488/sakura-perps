@@ -137,11 +137,8 @@ jobs:
       - name: Test the risk crate
         run: cargo test -p sakura-perps-risk --locked
 
-      - name: Test community risk rooms (paper prototype)
-        run: cargo test -p sakura-perps-rooms --locked
-
-      - name: Run the adversarial community season example
-        run: cargo run -p sakura-perps-rooms --example community_season --locked
+      - name: Run the public paper challenge entry point
+        run: scripts/security-challenge.sh paper
 
       # The program's own host-side tests. They were written to need no Solana
       # toolchain and no compiled `.so` precisely so they would be cheap to run,
@@ -157,6 +154,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
 
       - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1 # master @ 2024-10
         with:
@@ -204,9 +205,9 @@ jobs:
         # v1.52 despite Agave's v1.54 default. Separate IDL generation also keeps
         # SBF-only flags out of the host IDL compilation command.
         run: |
-          cargo-build-sbf --manifest-path programs/sakura-perps/Cargo.toml --tools-version "$SBF_TOOLS_VERSION"
+          cargo-build-sbf --manifest-path programs/sakura-perps/Cargo.toml --tools-version "$SBF_TOOLS_VERSION" -- --locked
           mkdir -p target/idl target/types
-          anchor idl build --out target/idl/sakura_perps.json --out-ts target/types/sakura_perps.ts
+          anchor idl build --out target/idl/sakura_perps.json --out-ts target/types/sakura_perps.ts -- --locked
 
       - name: Verify committed client ABI matches this source
         run: |
@@ -224,7 +225,10 @@ jobs:
           test "$DECLARED" = "$CONFIGURED"
 
       - name: Checksum
-        run: sha256sum target/deploy/sakura_perps.so | tee target/deploy/sakura_perps.so.sha256
+        run: |
+          sha256sum target/deploy/sakura_perps.so | tee target/deploy/sakura_perps.so.sha256
+          mkdir -p target/security-challenge
+          node scripts/challenge-manifest.mjs > target/security-challenge/manifest.json
 
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
@@ -234,6 +238,7 @@ jobs:
             target/deploy/sakura_perps.so.sha256
             target/idl/sakura_perps.json
             target/types/sakura_perps.ts
+            target/security-challenge/manifest.json
           if-no-files-found: error
 
   svm:

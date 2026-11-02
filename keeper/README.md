@@ -166,17 +166,20 @@ backlog landed in one step and carried the position past the fee-payable window.
 A polling keeper could have acted earlier if oracle access and transaction
 submission succeeded.
 
-### The crank is still worth running, for the pool rather than the keeper
+### Legacy cadence and the new historical accounting
 
-`accrue` clamps to `dt = min(elapsed, max_settle_window_seconds)` while
+The older implementation clamps to `dt = min(elapsed, max_settle_window_seconds)` while
 `last_settle_ts` advances to now regardless, so time beyond one window is
 **forgiven, not deferred**. An unattended market under-charges borrow interest
 and the shortfall lands on the LPs.
 
-That is a reason for *someone* to crank on a cadence. It is not a reason this bot
-must, and it changes no liquidation economics. `run.ts` does not do it; adding it
-is cheap if wanted — permissionless, `pool` and `market` only, and a no-op when
-`now == last_settle_ts`.
+The 2026-11-02 source fixes this for migrated books: full elapsed intervals,
+historical pool utilization and fractional funding carry. Existing legacy
+positions retain old accounting only while draining; no new opens are allowed
+until the pool is flat and migration can start without invented history.
+`run.ts` does not run a separate settlement crank. `settle_market` remains
+permissionless and now requires the canonical **writable** pool to checkpoint
+utilization. Generate clients from the upgraded program's matching IDL.
 
 `SUBSIDISED=1` liquidates at a loss for operators who care about pool solvency
 more than the fee. Off by default: a bot that quietly pays to work is a bot
