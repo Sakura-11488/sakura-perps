@@ -5549,3 +5549,225 @@ fn the_keeper_share_is_admin_only_and_capped() {
         "a refused write must leave the share where it was"
     );
 }
+
+/// Funding belongs to intervals of unchanged exposure. Trading must checkpoint
+/// the old interval and immediately sample the resulting book, including zero.
+#[test]
+fn funding_samples_follow_normal_long_flat_short_lifecycle() {
+    let mut fixture = Fixture::new(RiskParams {
+        funding_sensitivity: 1_000_000,
+        funding_cap_per_hour: 1_000_000,
+        min_settle_interval_seconds: 3_600,
+        ..lp_valuation_risk_params_with_funding_fees()
+    });
+    fixture.open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE).unwrap();
+    assert_eq!(
+        fixture.market_state().sampled_funding_rate_per_hour,
+        1_000_000
+    );
+    assert_eq!(fixture.market_state().cum_funding_index, 0);
+    fixture.advance(30, 75);
+    fixture.set_price(10_000);
+    fixture.close().unwrap();
+    let flat = fixture.market_state();
+    assert_eq!(flat.sampled_funding_rate_per_hour, 0);
+    assert_eq!(flat.cum_funding_index, 8_333);
+    assert_eq!(flat.funding_remainder_carry, 1_200);
+    assert_eq!(flat.last_rate_sample_ts, fixture.now_unix);
+    fixture.open(SIDE_SHORT, 10 * ONE_UNIT, 200 * ONE).unwrap();
+    let short = fixture.market_state();
+    assert_eq!(short.sampled_funding_rate_per_hour, -1_000_000);
+    assert_eq!(short.cum_funding_index, flat.cum_funding_index);
+    assert_eq!(
+        fixture.position_state().entry_funding_index,
+        flat.cum_funding_index
+    );
+    fixture.advance(30, 75);
+    fixture.set_price(10_000);
+    fixture.close().unwrap();
+    let flat_again = fixture.market_state();
+    assert_eq!(flat_again.sampled_funding_rate_per_hour, 0);
+    assert_eq!(flat_again.cum_funding_index, 0);
+    assert_eq!(flat_again.funding_remainder_carry, 0);
+    fixture.assert_i1("normal funding lifecycle");
+}
+
+fn lp_valuation_risk_params_with_funding_fees() -> RiskParams {
+    RiskParams {
+        // A one-hour cap of 0.1% rounds to10bps; fees must strictly exceed it.
+        close_fee_bps: 11,
+        ..lp_valuation_risk_params()
+    }
+}
+
+fn close_normal_position_for(
+    fixture: &mut Fixture,
+    owner: &Keypair,
+    tokens: Address,
+) -> Result<Vec<String>, TransactionError> {
+    let previous_owner = std::mem::replace(&mut fixture.trader, owner.insecure_clone());
+    let previous_tokens = std::mem::replace(&mut fixture.trader_token_account, tokens);
+    let result = fixture.close();
+    fixture.trader = previous_owner;
+    fixture.trader_token_account = previous_tokens;
+    result
+}
+
+#[test]
+fn funding_samples_partial_closes_without_rewriting_prior_intervals() {
+    let mut fixture = Fixture::new(RiskParams {
+        funding_sensitivity: 1_000_000,
+        funding_cap_per_hour: 1_000_000,
+        min_settle_interval_seconds: 3_600,
+        ..lp_valuation_risk_params_with_funding_fees()
+    });
+    let (short_owner, short_tokens) = fixture.newcomer();
+    let (long_owner, long_tokens) = fixture.newcomer();
+    fixture.open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE).unwrap();
+    fixture.advance(30, 75);
+    fixture.set_price(10_000);
+    let balanced_open = fixture.open_ix_for(
+        short_owner.pubkey(),
+        short_tokens,
+        SIDE_SHORT,
+        10 * ONE_UNIT,
+        200 * ONE,
+        1,
+    );
+    fixture.send(balanced_open, &[&short_owner]).unwrap();
+    let balanced = fixture.market_state();
+    assert_eq!(balanced.sampled_funding_rate_per_hour, 0);
+    assert_eq!(balanced.cum_funding_index, 8_333);
+    assert_eq!(balanced.funding_remainder_carry, 1_200);
+
+    fixture.advance(30, 75);
+    fixture.set_price(10_000);
+    let unbalanced_open = fixture.open_ix_for(
+        long_owner.pubkey(),
+        long_tokens,
+        SIDE_LONG,
+        5 * ONE_UNIT,
+        100 * ONE,
+        u128::MAX,
+    );
+    fixture.send(unbalanced_open, &[&long_owner]).unwrap();
+    let unbalanced = fixture.market_state();
+    assert_eq!(unbalanced.sampled_funding_rate_per_hour, 200_000);
+    assert_eq!(unbalanced.cum_funding_index, balanced.cum_funding_index);
+    assert_eq!(
+        unbalanced.funding_remainder_carry,
+        balanced.funding_remainder_carry
+    );
+
+    fixture.advance(30, 75);
+    fixture.set_price(10_000);
+    fixture.close().unwrap();
+    let partially_closed = fixture.market_state();
+    assert_eq!(partially_closed.sampled_funding_rate_per_hour, -333_333);
+    assert_eq!(partially_closed.cum_funding_index, 10_000);
+    assert_eq!(partially_closed.funding_remainder_carry, 0);
+    assert_eq!(
+        (
+            partially_closed.long_positions,
+            partially_closed.short_positions
+        ),
+        (1, 1)
+    );
+    close_normal_position_for(&mut fixture, &long_owner, long_tokens).unwrap();
+    assert_eq!(
+        fixture.market_state().sampled_funding_rate_per_hour,
+        -1_000_000
+    );
+    assert_eq!(fixture.market_state().cum_funding_index, 10_000);
+    close_normal_position_for(&mut fixture, &short_owner, short_tokens).unwrap();
+    assert_eq!(fixture.market_state().sampled_funding_rate_per_hour, 0);
+    assert_eq!(fixture.market_state().cum_funding_index, 10_000);
+    fixture.assert_i1("partial closes resample only future funding");
+}
+
+#[test]
+fn funding_book_transitions_preserve_clock_high_water() {
+    let mut fixture = Fixture::new(RiskParams {
+        funding_sensitivity: 1_000_000,
+        funding_cap_per_hour: 1_000_000,
+        ..lp_valuation_risk_params_with_funding_fees()
+    });
+    fixture.open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE).unwrap();
+    fixture.advance(60, 150);
+    fixture.settle_market().unwrap();
+    let before = fixture.market_state();
+    assert_eq!(before.cum_funding_index, 16_666);
+    fixture.advance(-30, 1);
+    fixture.set_price(10_000);
+    fixture.close().unwrap();
+    let flat = fixture.market_state();
+    assert_eq!(flat.last_settle_ts, before.last_settle_ts);
+    assert_eq!(flat.last_rate_sample_ts, before.last_rate_sample_ts);
+    assert_eq!(flat.cum_funding_index, before.cum_funding_index);
+    assert_eq!(flat.sampled_funding_rate_per_hour, 0);
+    fixture.open(SIDE_SHORT, 10 * ONE_UNIT, 200 * ONE).unwrap();
+    assert_eq!(
+        fixture.market_state().sampled_funding_rate_per_hour,
+        -1_000_000
+    );
+    assert_eq!(
+        fixture.market_state().last_rate_sample_ts,
+        before.last_rate_sample_ts
+    );
+    fixture.advance(30, 75);
+    fixture.settle_market().unwrap();
+    assert_eq!(
+        fixture.market_state().cum_funding_index,
+        before.cum_funding_index
+    );
+    fixture.advance(1, 1);
+    fixture.settle_market().unwrap();
+    assert_eq!(fixture.market_state().cum_funding_index, 16_388);
+    assert_eq!(fixture.market_state().funding_remainder_carry, 3_200);
+}
+
+#[test]
+fn failed_close_transfer_rolls_back_funding_accrual_and_resampling() {
+    let mut fixture = Fixture::new(RiskParams {
+        funding_sensitivity: 1_000_000,
+        funding_cap_per_hour: 1_000_000,
+        ..lp_valuation_risk_params_with_funding_fees()
+    });
+    fixture.open(SIDE_LONG, 10 * ONE_UNIT, 200 * ONE).unwrap();
+    fixture.advance(30, 75);
+    fixture.set_price(10_000);
+    // Harness-only failure injection: force the owner's otherwise-valid SPL
+    // account into Frozen state. This tests a late CPI rollback, not an action
+    // available to an attacker against this fixture's no-freeze-authority mint.
+    let mut token = fixture
+        .svm
+        .get_account(&fixture.trader_token_account)
+        .unwrap();
+    token.data[108] = 2;
+    fixture
+        .svm
+        .set_account(fixture.trader_token_account, token)
+        .unwrap();
+    let before = snapshot_accounts(
+        &fixture,
+        &[
+            fixture.pool,
+            fixture.market,
+            fixture.position_key(),
+            fixture.quote_vault,
+            fixture.trader_token_account,
+        ],
+    );
+    assert_eq!(
+        fixture.close().unwrap_err(),
+        TransactionError::InstructionError(0, InstructionError::Custom(17)),
+        "SPL Token AccountFrozen must fail after the close ledger",
+    );
+    assert_accounts_unchanged(&fixture, before);
+    assert_eq!(
+        fixture.market_state().sampled_funding_rate_per_hour,
+        1_000_000
+    );
+    assert_eq!(fixture.market_state().cum_funding_index, 0);
+    assert!(fixture.position_exists());
+}

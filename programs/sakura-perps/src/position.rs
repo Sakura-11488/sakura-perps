@@ -437,10 +437,10 @@ fn apply_open_ledger(
             .ok_or(PerpsError::MathOverflow)?;
     }
 
-    Ok(())
+    crate::market::sample_funding_after_book_change(market)
 }
 
-/// The close ledger. One implementation, three callers.
+/// The close ledger, shared by ordinary, admin, emergency and keeper exits.
 ///
 /// The only thing that differs between an ordinary close, an admin settlement
 /// and an emergency close is `settled.liquidation_fee_quote`, which is zero on
@@ -565,7 +565,7 @@ fn apply_close_ledger(
         .checked_add(settled.bad_debt_usd)
         .ok_or(PerpsError::MathOverflow)?;
 
-    Ok(())
+    crate::market::sample_funding_after_book_change(market)
 }
 
 /// Move a settled payout out of the vault, under the pool's own authority.
