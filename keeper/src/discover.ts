@@ -7,7 +7,7 @@
  * layouts would be a second source of truth maintained by hand.
  */
 import { PublicKey } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { associatedTokenAddress } from "./token-address";
 import type { Ctx, ExchangeView } from "./program";
 
 export interface PositionRow {
@@ -94,10 +94,9 @@ export async function resolveOwnerTokenAccount(
   exchange: ExchangeView,
   owner: PublicKey,
 ): Promise<PublicKey | null> {
-  const ata = getAssociatedTokenAddressSync(
+  const ata = associatedTokenAddress(
     exchange.collateralMint,
     owner,
-    true,
     exchange.collateralTokenProgram,
   );
   const info = await ctx.connection.getAccountInfo(ata, "confirmed");

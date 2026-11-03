@@ -13,6 +13,7 @@ import fs from "fs";
 import path from "path";
 import type { SakuraPerps } from "../../idl/sakura_perps";
 import { Config, DEVNET_GENESIS, PROGRAM_ID, redactRpc } from "./config";
+import { createBoundedRpcFetch, rpcLimitsFromEnv } from "./bounded-fetch";
 
 export interface Ctx {
   connection: Connection;
@@ -31,7 +32,10 @@ export function loadIdl(): anchor.Idl {
 }
 
 export async function buildCtx(cfg: Config, keeper: Keypair): Promise<Ctx> {
-  const connection = new Connection(cfg.rpcUrl, "confirmed");
+  const connection = new Connection(cfg.rpcUrl, {
+    commitment: "confirmed",
+    fetch: createBoundedRpcFetch(rpcLimitsFromEnv()),
+  });
 
   // Refuse an unexpected cluster before anything is signed. A wrong RPC_URL is
   // otherwise silent right up until the first mainnet signature.

@@ -4,6 +4,14 @@ A **read-only**, live dashboard for the [sakura-perps](https://github.com/Sakura
 program on Solana **devnet**. It reads on-chain state and renders it — it sends
 nothing on-chain, signs nothing, and needs no funds.
 
+Both RPC connections bound each HTTP attempt through body completion, using
+`RPC_TIMEOUT_MS` (default 10,000; maximum 30,000) and `RPC_MAX_RESPONSE_BYTES`
+(default 16 MiB; maximum 64 MiB). Redirects, invalid/deep JSON and oversized
+responses fail closed. These are per-attempt limits; web3's HTTP 429 retries can
+take up to five attempts plus backoff. They do not implement global request
+admission or pagination. The shared adapter lives in
+`../keeper/src/bounded-fetch.js` and is included by the dashboard build.
+
 Built entirely against the repo's **committed IDL** (`../idl/sakura_perps.json`),
 so it runs with just Node — no Anchor / Solana / Rust toolchain and no
 `anchor build` required.

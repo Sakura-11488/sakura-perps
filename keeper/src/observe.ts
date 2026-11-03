@@ -9,6 +9,7 @@
 import fs from "fs";
 import path from "path";
 import { redactRpc } from "./config";
+import { createHeartbeat } from "./heartbeat";
 
 const logDir = path.resolve(__dirname, "..", "logs");
 
@@ -61,8 +62,6 @@ export const log = {
   error: (event: string, fields: Fields = {}) => emit("error", event, fields),
 };
 
-let lastHeartbeat = 0;
-
 /**
  * Ping only while healthy.
  *
@@ -70,17 +69,8 @@ let lastHeartbeat = 0;
  * regardless of state tells you the process exists, which was never the
  * question.
  */
-export async function heartbeat(
-  url: string | undefined,
-  healthy: boolean,
-  nowMs: number,
-): Promise<void> {
-  if (!url || !healthy) return;
-  if (nowMs - lastHeartbeat < 60_000) return;
-  lastHeartbeat = nowMs;
-  try {
-    await fetch(url, { method: "GET" });
-  } catch (e) {
-    log.warn("heartbeat-failed", { detail: String(e).slice(0, 120) });
-  }
-}
+export const heartbeat = createHeartbeat({
+  onFailure: () => {
+    log.warn("heartbeat-failed", { detail: "heartbeat request unavailable" });
+  },
+});

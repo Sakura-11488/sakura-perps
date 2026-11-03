@@ -19,7 +19,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { associatedTokenAddress } from "./token-address";
 import type { Ctx, ExchangeView } from "./program";
 import type { MarketRow, PositionRow } from "./discover";
 import { classifyLiquidation, CodeTable, failingIndexOf, Verdict } from "./errors";
@@ -39,10 +39,9 @@ export async function buildLiquidateIx(
   exchange: ExchangeView,
   c: Candidate,
 ): Promise<TransactionInstruction> {
-  const keeperTokenAccount = getAssociatedTokenAddressSync(
+  const keeperTokenAccount = associatedTokenAddress(
     exchange.collateralMint,
     ctx.keeper.publicKey,
-    true,
     exchange.collateralTokenProgram,
   );
 
@@ -89,10 +88,9 @@ export async function simulate(
 ): Promise<SimResult> {
   if (!liquidateIx.programId.equals(PROGRAM_ID))
     throw new Error("liquidation instruction targets an unexpected program");
-  const keeperAta = getAssociatedTokenAddressSync(
+  const keeperAta = associatedTokenAddress(
     exchange.collateralMint,
     ctx.keeper.publicKey,
-    true,
     exchange.collateralTokenProgram,
   );
   const pre = await tokenAmount(ctx.connection, keeperAta);
