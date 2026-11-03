@@ -4301,9 +4301,9 @@
           {
             "name": "min_settle_interval_seconds",
             "docs": [
-              "Rate-resample interval. **Not** a floor on accrual: accrual is",
-              "continuous, and throttling it would make what is owed depend on how",
-              "often somebody called settle."
+              "Standalone-settlement resample interval, never an accrual floor.",
+              "Migrated exposure changes and risk retunes always sample prospectively;",
+              "this cadence only throttles redundant samples while the book is unchanged."
             ],
             "type": "u32"
           },

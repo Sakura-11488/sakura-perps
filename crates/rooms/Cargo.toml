@@ -6,4 +6,5 @@ license = "BUSL-1.1"
 description = "Experimental paper-only Risk Rooms with isolated backing and replayable consent receipts"
 
 [dependencies]
+borsh = { version = "=1.8.0", features = ["derive", "de_strict_order"] }
 sakura-perps-risk = { path = "../risk" }

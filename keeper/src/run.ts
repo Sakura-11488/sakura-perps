@@ -280,7 +280,7 @@ async function main(): Promise<void> {
         healthy,
         degraded: health.reasons,
       });
-      await heartbeat(cfg.heartbeatUrl, healthy, Date.now());
+      await heartbeat(cfg.heartbeatUrl, healthy, performance.now());
     } catch (error) {
       health.fail("scan", "book or pending-transaction reconciliation failed");
       log.error("tick-failed", { detail: String(error).slice(0, 300) });

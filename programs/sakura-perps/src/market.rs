@@ -257,9 +257,9 @@ pub struct Market {
     /// Legacy drain-only accrual cap. Retained for account/instruction compatibility;
     /// migrated books accrue the full elapsed interval.
     pub max_settle_window_seconds: u32,
-    /// Rate-resample interval. **Not** a floor on accrual: accrual is
-    /// continuous, and throttling it would make what is owed depend on how
-    /// often somebody called settle.
+    /// Standalone-settlement resample interval, never an accrual floor.
+    /// Migrated exposure changes and risk retunes always sample prospectively;
+    /// this cadence only throttles redundant samples while the book is unchanged.
     pub min_settle_interval_seconds: u32,
     pub cum_borrow_index: u128,
     /// The undivided remainder from borrow accrual.
@@ -787,14 +787,8 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
     market.risk_revision = risk_revision;
     // The old rate has already paid for its elapsed interval. A retune starts
     // the new funding schedule now, even inside the normal sampling interval.
-    market.sampled_funding_rate_per_hour = funding_rate_per_hour(
-        market.long_oi_usd,
-        market.short_oi_usd,
-        market.funding_sensitivity,
-        market.funding_cap_per_hour,
-    )
-    .map_err(crate::oracle::map_risk_error)?;
-    market.last_rate_sample_ts = market.last_settle_ts;
+    let effective_ts = market.last_settle_ts;
+    sample_funding_rate(market, effective_ts)?;
 
     emit!(RiskParamsSet {
         market: market.key(),
@@ -819,6 +813,33 @@ pub fn handle_set_risk_params(ctx: Context<SetRiskParams>, params: RiskParams) -
         quarantined_ts: market.quarantined_ts,
     });
 
+    Ok(())
+}
+
+/// Record the rate for future time without changing any accrued obligation.
+fn sample_funding_rate(market: &mut Market, effective_ts: i64) -> Result<()> {
+    market.sampled_funding_rate_per_hour = funding_rate_per_hour(
+        market.long_oi_usd,
+        market.short_oi_usd,
+        market.funding_sensitivity,
+        market.funding_cap_per_hour,
+    )
+    .map_err(crate::oracle::map_risk_error)?;
+    market.last_rate_sample_ts = market.last_rate_sample_ts.max(effective_ts);
+    Ok(())
+}
+
+/// A successful exposure mutation starts a new funding interval. Its caller
+/// must accrue the old book before applying the ledger; this function touches
+/// only the future rate and its sampling timestamp, never indices or carry.
+///
+/// Nonempty legacy books retain their drain-only sampling rules. Their final
+/// close clears the sample so a later migrated book cannot inherit an old rate.
+pub(crate) fn sample_funding_after_book_change(market: &mut Market) -> Result<()> {
+    if market.borrow_integral_initialized || (market.long_oi_usd == 0 && market.short_oi_usd == 0) {
+        let effective_ts = market.last_settle_ts;
+        sample_funding_rate(market, effective_ts)?;
+    }
     Ok(())
 }
 
@@ -927,14 +948,7 @@ pub(crate) fn accrue(market: &mut Market, pool: &mut Pool, clock: &Clock) -> Res
         .checked_sub(market.last_rate_sample_ts)
         .ok_or(PerpsError::MathOverflow)?;
     if since_sample >= i64::from(market.min_settle_interval_seconds) {
-        market.sampled_funding_rate_per_hour = funding_rate_per_hour(
-            market.long_oi_usd,
-            market.short_oi_usd,
-            market.funding_sensitivity,
-            market.funding_cap_per_hour,
-        )
-        .map_err(crate::oracle::map_risk_error)?;
-        market.last_rate_sample_ts = now;
+        sample_funding_rate(market, now)?;
     }
     market.last_settle_ts = market.last_settle_ts.max(now);
     Ok(Some(dt))
@@ -1586,6 +1600,38 @@ pub(crate) mod tests {
         assert_eq!(market.cum_borrow_index, 250);
         assert_eq!(market.borrow_remainder_carry, 0);
         assert_eq!(market.last_settle_ts, start + 60);
+    }
+
+    #[test]
+    fn book_resampling_preserves_indices_and_legacy_drain_until_flat() {
+        let mut market = test_market();
+        market.long_oi_usd = 1_000 * USD_SCALE;
+        market.cum_funding_index = 83;
+        market.funding_remainder_carry = 1_200;
+        market.last_rate_sample_ts = market.last_settle_ts + 10;
+        sample_funding_after_book_change(&mut market).unwrap();
+        assert_eq!(market.sampled_funding_rate_per_hour, 1_000_000);
+        assert_eq!(market.last_rate_sample_ts, market.last_settle_ts + 10);
+        assert_eq!(
+            (market.cum_funding_index, market.funding_remainder_carry),
+            (83, 1_200)
+        );
+
+        market.borrow_integral_initialized = false;
+        market.short_oi_usd = 1_000 * USD_SCALE;
+        sample_funding_after_book_change(&mut market).unwrap();
+        assert_eq!(
+            market.sampled_funding_rate_per_hour, 1_000_000,
+            "nonempty legacy sampling is unchanged"
+        );
+        market.long_oi_usd = 0;
+        market.short_oi_usd = 0;
+        sample_funding_after_book_change(&mut market).unwrap();
+        assert_eq!(market.sampled_funding_rate_per_hour, 0);
+        assert_eq!(
+            (market.cum_funding_index, market.funding_remainder_carry),
+            (83, 1_200)
+        );
     }
 
     #[test]

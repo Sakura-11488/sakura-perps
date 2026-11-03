@@ -20,6 +20,8 @@ fi
 echo 'Sakura security challenge: local simulation; no live transactions or real funds.'
 cargo test -p sakura-perps-rooms --locked
 cargo run -p sakura-perps-rooms --example community_season --locked
+cargo test -p sakura-perps-rooms-auth --locked
+cargo run -p sakura-perps-rooms-auth --example signed_room --locked
 if [[ "$mode" == paper ]]; then
   echo 'Paper checks passed. Use full mode for the compiled Solana program and service tests.'
   exit 0

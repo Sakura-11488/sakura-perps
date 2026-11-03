@@ -1,0 +1,12 @@
+[package]
+name = "sakura-perps-rooms-auth"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+description = "Authenticated command envelope for the experimental Sakura Risk Rooms paper model"
+
+[dependencies]
+borsh = { version = "=1.8.0", features = ["derive", "de_strict_order"] }
+ed25519-dalek = "=2.2.0"
+sha2 = "=0.10.9"
+sakura-perps-rooms = { path = "../rooms" }

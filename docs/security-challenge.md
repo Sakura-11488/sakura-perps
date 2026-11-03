@@ -11,6 +11,9 @@ source and is **not the challenge target**.
 The challenge includes the Solana perpetuals program, its keeper and read-only
 dashboard, and a separate Risk Rooms paper model for community strategies.
 Risk Rooms uses finite capped contracts; it does not implement a live perp.
+Its [signed-command wrapper](../crates/rooms-auth/README.md) now verifies real
+Ed25519 authorizations. The underlying paper kernel remains available separately
+for economic experiments, with its original asserted-identity assumptions.
 
 ## Start without a wallet
 
@@ -23,7 +26,8 @@ git rev-parse HEAD
 scripts/security-challenge.sh paper
 ```
 
-The paper command runs the room tests and an adversarial community season. It
+The paper command runs the room and signed-wrapper tests, a community season,
+and the signed-room demonstration. It
 needs no Solana installation, wallet, RPC account or environment file. Package
 downloads may need network access. The example asserts rejected attacks as well
 as successful trades; it fails if the expected protections stop working.
@@ -58,6 +62,13 @@ scenario, strict clippy, formatting, TypeScript and generated-ABI comparison
 also passed. The dashboard production build passed separately. These finite
 checks are regression evidence, not an independent audit or exhaustive search.
 
+The 2026-11-03 source batch passed **340 tests** through the full entry point:
+111 SVM, 98 risk, 36 program host, 17 kernel Rooms, 20 authenticated Rooms,
+40 keeper and 18 dashboard tests. Both examples, fresh SBF/IDL generation,
+strict clippy, formatting and TypeScript passed; the dashboard production build
+passed separately. This adds evidence for funding lifecycle, signed commands
+and bounded network operations without changing the launch/intake status above.
+
 ## Where to attack
 
 | Target | Useful counterexample |
@@ -67,6 +78,7 @@ checks are regression evidence, not an independent audit or exhaustive search.
 | `oracle.rs` and emergency exits | A wrong feed, unverified/future/stale update or liquidation-grade observation becomes a strict recovery snapshot; quarantine permits the snapshot to move. |
 | `crates/risk` | Checked integer arithmetic, rounding, funding carry or settlement fails at a boundary or under an equivalent partition of time. |
 | `crates/rooms` | A delegate exceeds an owner's cumulative budget, spends the same remaining limit twice, accesses another backing cell, changes accepted economics or settles to a different beneficiary. |
+| `crates/rooms-auth` | A wrong key/domain, replay, expired authorization, altered canonical bytes or revoked-and-regranted delegation bypasses signature checks; a failed command consumes a sequence or modifies state; replay accepts a changed transcript against the original trusted head. |
 | `keeper/src` | Restart, ambiguous broadcast, receipt loss, bad oracle responses or RPC errors bypass the spending reservation, duplicate a send, conceal an unhealthy book or expose credentials. |
 | `dashboard/lib` and `dashboard/app` | Server credentials escape, invalid observations appear healthy, or an upstream failure becomes trusted market information. |
 
@@ -77,6 +89,11 @@ before replacing them. Migrated accrual retains the full elapsed interval;
 funding retains a nonnegative sub-index remainder, including across rate sign
 changes. These are specific testable claims, not an assertion that the economic
 design is complete.
+
+Migrated exposure changes now close the old funding interval and sample the
+resulting book prospectively, including zero for an empty book. The former
+sampling cadence cannot leave a previous book's rate attached to new exposure.
+See the [funding lifecycle regression](research/2026-11-03-funding-adversarial.md).
 
 Recovery prices are raw observations accepted under strict trading checks,
 recorded at the oracle's publication time. Only newer observations on an active
@@ -89,6 +106,7 @@ Useful focused commands after a full build:
 ```sh
 cargo test -p sakura-perps-risk --locked
 cargo test -p sakura-perps-rooms --locked
+cargo test -p sakura-perps-rooms-auth --locked
 SAKURA_PERPS_SO="$PWD/target/deploy/sakura_perps.so" cargo test -p sakura-perps-svm-tests --locked
 npm run test:keeper
 npm --prefix dashboard test
@@ -127,10 +145,15 @@ The following are unresolved and are not hidden behind a passing suite:
 - **Funding, liquidation and insolvency need further research.** Funding farms,
   reserve grief, incentives under congestion, insurance and bad-debt recovery
   are not solved by temporal accounting fixes.
-- **Risk Rooms is an in-memory model.** Identities and price inputs are asserted
-  by the scenario, not authenticated. Its administrator supplies immutable
+- **Risk Rooms is an in-memory model.** Direct kernel identities are asserted.
+  The signed wrapper authenticates commands against an immutable key registry;
+  it does not verify collateral transfers, oracle truth or operator time. Its
+  hash chain needs an independently trusted genesis/head checkpoint and complete
+  replay after restart. There is no durable storage, key recovery or consensus.
+  Its administrator supplies immutable
   terminal observations. Missing terminal data locks reserves; there is no
-  guaranteed permanent-outage exit. Its transcript is not a signed ledger.
+  guaranteed permanent-outage exit. The raw kernel transcript is not a signed
+  ledger; wrapper evidence still has the separate trust limits above.
 - **Governance and operations remain trusted.** Admin feed qualification,
   mutable risk policy, upgrade authority, RPC availability and keeper operation
   need deployment rehearsal and independent review. Local checks do not prove

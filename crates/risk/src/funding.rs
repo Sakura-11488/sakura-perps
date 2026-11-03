@@ -11,18 +11,20 @@
 //! If funding were a discrete payment applied at a settlement instant, a trader
 //! could open a large one-sided position immediately before settlement, collect,
 //! and close immediately after. Accruing over `Δt` removes the instant to aim
-//! at. Three further defences belong in the program rather than here: settle at
-//! the head of every open, close and liquidate so `Δt` is always small; enforce
-//! a minimum interval so a settler who has just moved open interest cannot pick
-//! the sampling moment; and checkpoint utilization before changing exposure.
-//! Elapsed time must not be discarded when a market goes unattended.
+//! at. The program must settle the old book at the head of each exposure change,
+//! checkpoint historical utilization, then sample funding for the resulting book
+//! prospectively. A minimum maintenance interval cannot justify keeping a rate
+//! from a book that no longer exists. Nonempty legacy drain accounts retain their
+//! documented old policy. Elapsed time must not be discarded on migrated books.
 //!
 //! There is also a design constraint worth writing down, because it is easy to
 //! violate by tuning parameters innocently: **round-trip fees must exceed the
 //! maximum funding accruable in the minimum holding period.** At 6 bps open plus
 //! 6 bps close against a 10 bps-per-hour funding cap, farming funding for an
 //! hour is structurally unprofitable. Lower the fees or raise the cap without
-//! checking this and you have created a money pump.
+//! checking this permits profitable short-horizon funding strategies. That fee
+//! comparison does not prove that funding credits over longer periods are backed
+//! by collectible debits; that remains a separate economic design requirement.
 
 use crate::error::RiskError;
 use crate::math::{mul_div_ceil, mul_div_floor, mul_div_i128};

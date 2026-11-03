@@ -207,6 +207,23 @@ nobody notices burning a wallet.
 
 ## Durable submissions and health
 
+HTTP RPC requests now bound the entire response lifetime: `RPC_TIMEOUT_MS`
+defaults to 10,000 (maximum 30,000), and `RPC_MAX_RESPONSE_BYTES` defaults to
+16,777,216 (maximum 67,108,864). Invalid limits fail startup. Redirects, malformed
+JSON, excessive nesting, stalled bodies and oversized bodies fail closed.
+Successful JSON-RPC bytes and simulation context/error data remain unchanged.
+The limits apply per HTTP attempt; web3 may retry HTTP 429 five times with a total
+7.5 seconds of backoff. The bound is therefore 57.5 seconds for that retry path
+at defaults, not ten seconds for every RPC method. WebSocket traffic and global
+request concurrency are outside this adapter.
+
+Heartbeat throttling uses a monotonic clock. Requests have a separate two-second
+deadline and 4 KiB body cap. A
+stalled monitoring endpoint can no longer stop later scans indefinitely. Runtime
+ATA derivation uses the canonical seeds for the selected token program; SPL
+Token and its native bigint dependency are now needed only by development fixture
+scripts, not by the keeper's production dependency install.
+
 `keeper/.state.json` binds the journal to genesis hash, program and keeper wallet.
 One process owns its lock. Never share this wallet with another spending process
 or copy the journal to an unrelated cluster. Preserve the journal across restarts;

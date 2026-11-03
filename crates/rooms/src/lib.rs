@@ -9,6 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use sakura_perps_risk::{
     math::{cmp_products, mul_div_ceil},
     position::{equity, notional_usd_ceil, settle_close, unrealized_pnl},
@@ -16,16 +18,36 @@ use sakura_perps_risk::{
 };
 pub use sakura_perps_risk::{scale::PRICE_SCALE, Side};
 
+// Stable wire tags live here rather than adding a codec dependency to risk math.
+fn serialize_side<W: borsh::io::Write>(side: &Side, writer: &mut W) -> borsh::io::Result<()> {
+    let tag: u8 = match side {
+        Side::Long => 0,
+        Side::Short => 1,
+    };
+    tag.serialize(writer)
+}
+
+fn deserialize_side<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Side> {
+    match u8::deserialize_reader(reader)? {
+        0 => Ok(Side::Long),
+        1 => Ok(Side::Short),
+        _ => Err(borsh::io::Error::new(
+            borsh::io::ErrorKind::InvalidData,
+            "invalid side tag",
+        )),
+    }
+}
+
 macro_rules! id {
     ($($name:ident),+ $(,)?) => {$ (
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, BorshSerialize, BorshDeserialize)]
         pub struct $name(pub u64);
     )+ };
 }
 id!(RoomId, OwnerId, DelegateId, MemberId, CellId, MarketId, PositionId);
 
 /// Caller-asserted role; the simulator does not verify any cryptographic proof.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, BorshSerialize, BorshDeserialize)]
 pub enum Actor {
     Owner(OwnerId),
     Delegate(DelegateId),
@@ -93,7 +115,7 @@ fn next(a: u64) -> Result<u64, Error> {
 
 /// Future-entry policy. All quote quantities are atoms of an abstract 6-decimal
 /// quote unit; this model makes no dollar peg or real-world loss guarantee.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Policy {
     pub contribution_limit_quote: u128,
     /// Lifetime gross losses + entry fees + collateral currently at risk.
@@ -132,7 +154,7 @@ impl Policy {
 
 /// Backing-owner opt-in for future entries. Empty admission sets pause entries.
 /// Existing receipts retain their terms and reserves through policy changes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct UnderwritingPolicy {
     /// Bind admission to identity and incarnation, including before registration.
     pub allowed_members: BTreeSet<(MemberId, OwnerId, u64)>,
@@ -167,7 +189,7 @@ impl UnderwritingPolicy {
 
 /// A generation's immutable oracle and fee assumptions. The administrator may
 /// register the next generation, but an old position retains this full snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Market {
     pub id: MarketId,
     pub generation: u64,
@@ -212,7 +234,7 @@ impl Market {
 
 /// Injected observation; ownership, publication and truth are assumed by the
 /// paper scenario. A real implementation needs an authenticated oracle adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Observation {
     pub market: MarketId,
     pub generation: u64,
@@ -220,7 +242,7 @@ pub struct Observation {
     pub published_slot: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Consent {
     pub room: RoomId,
     pub member: MemberId,
@@ -256,12 +278,16 @@ impl Consent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct OpenIntent {
     pub consent: Consent,
     pub market: MarketId,
     pub cell: CellId,
     pub cell_policy_revision: u64,
+    #[borsh(
+        serialize_with = "serialize_side",
+        deserialize_with = "deserialize_side"
+    )]
     pub side: Side,
     pub size_base: u128,
     pub collateral_quote: u128,
@@ -271,7 +297,7 @@ pub struct OpenIntent {
     pub maturity_slot: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CloseIntent {
     pub consent: Consent,
     pub position: PositionId,
@@ -327,7 +353,7 @@ impl Cell {
 
 /// The complete economic agreement actually executed. Copies returned to callers
 /// cannot modify the archived receipt. Canonical fields replace an unverified hash.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct OpenReceipt {
     pub position: PositionId,
     pub owner: OwnerId,
@@ -371,7 +397,7 @@ impl OpenReceipt {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CloseReceipt {
     pub position: PositionId,
     pub member: MemberId,
@@ -386,7 +412,7 @@ pub struct CloseReceipt {
     pub released_reserve_quote: u128,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Command {
     RegisterMarket {
         actor: Actor,
@@ -464,7 +490,7 @@ pub enum Command {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Outcome {
     RegisteredMarket {
         market: MarketId,
@@ -504,7 +530,7 @@ pub enum Outcome {
     Closed(CloseReceipt),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Record {
     pub command: Command,
     pub outcome: Outcome,

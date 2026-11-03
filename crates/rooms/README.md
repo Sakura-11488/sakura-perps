@@ -2,6 +2,12 @@
 
 This crate is an **original, unaudited, in-memory paper simulator**. It contains no Solana program, wallet, private key, signature verifier, token transfer, RPC client or deployment path. The asserted owner/delegate IDs and oracle inputs are trusted scenario inputs. Passing a test does not authenticate a user or establish a production financial guarantee.
 
+The separate [signed-command gateway](../rooms-auth/README.md) now verifies real
+Ed25519 signatures and canonical, versioned commands before calling this kernel.
+It adds per-actor replay protection and delegation-revision checks. Direct calls
+to this crate remain an asserted-identity simulation; the gateway does not add
+token custody, oracle truth or durable consensus.
+
 The product hypothesis is collaborative strategy execution without a shared discretionary wallet: several members can authorize one delegate, while each member retains their own lifetime contribution budget, loss budget and withdrawal rights. A strategy selects a backing cell that both the member and backing owner explicitly permit. That cell alone reserves the position's entire possible payout. Two teams can coordinate strategies without implicitly underwriting each other.
 
 These are **finite, capped, quote-settled contracts**, with optional early close and a fixed maturity observation. They are not perpetual futures: there is no funding, continuous mark accrual, order book, liquidation, portfolio margin, ADL, insurance waterfall or live price discovery. Quote atoms are an abstract six-decimal unit; there is no assumed dollar peg and no real-world maximum-loss guarantee.

@@ -4,6 +4,7 @@ import "server-only";
 import idl from "../../idl/sakura_perps.json" with { type: "json" };
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
+import { createBoundedRpcFetch, rpcLimitsFromEnv } from "../../keeper/src/bounded-fetch.js";
 
 const RPC = process.env.RPC ?? "https://api.devnet.solana.com";
 
@@ -15,8 +16,15 @@ const ORACLE_SOL_USD = new PublicKey(
 const bn = (v) => (v ? BigInt(v.toString()) : 0n);
 const usdc = (v) => Number(bn(v)) / 1e6;
 
+export function readConnection() {
+  return new Connection(RPC, {
+    commitment: "confirmed",
+    fetch: createBoundedRpcFetch(rpcLimitsFromEnv()),
+  });
+}
+
 function getProgram() {
-  const connection = new Connection(RPC, "confirmed");
+  const connection = readConnection();
   const provider = new anchor.AnchorProvider(
     connection,
     new anchor.Wallet(Keypair.generate()), // throwaway; never signs
@@ -117,7 +125,7 @@ function evaluateGuards(d, clock, G) {
 // Lightweight reference monitor. Account provenance is checked, but market
 // configuration, revocation, pause, EMA divergence and margin are not evaluated.
 export async function readOracleState(connection) {
-  const conn = connection ?? new Connection(RPC, "confirmed");
+  const conn = connection ?? readConnection();
   const info = await conn.getAccountInfo(ORACLE_SOL_USD, "confirmed");
   if (!info) return null;
   const d = decodePythPrice(info);

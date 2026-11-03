@@ -1,6 +1,6 @@
 # Security hardening
 
-This tracks security implementation through the 2026-11-02 challenge build.
+This tracks security implementation through the 2026-11-03 source batch.
 These are **source changes, not a deployment record**. The documented devnet
 release remains `devnet-v0.7.0`; the new admin instructions require a program
 upgrade before clients can call them. The protocol remains unaudited and is not
@@ -19,8 +19,11 @@ ready for funds of real value.
 | Trading consent | Opens bind an exact risk revision and slot deadline; closes bind a unique position generation. A reused position PDA does not reuse its consent. |
 | Borrow history | Every pool equity/reserve mutation checkpoints prior utilization. Markets consume the historical integral; rate changes first accrue at the old rates. Legacy active books must drain before new opens. |
 | Funding history | Migrated accounts accrue the full elapsed interval and carry a canonical fractional remainder, including across rate sign changes. |
+| Funding lifecycle | Every migrated open/close settles the old interval before sampling the resulting book. A flat book samples zero. Nonempty legacy drain behavior is retained. |
 | Emergency prices | Only strictly validated raw oracle observations on active markets can advance the recovery cache. Publication time and provenance are retained; quarantine freezes it. Liquidation-grade observations and legacy entry-price fallbacks cannot supply it. |
 | Keeper oracle transport | HTTPS single-feed requests have streamed body/binary caps, a request-and-body deadline, binary/JSON consistency checks, cluster-clock freshness and fixed errors. Receiver verification remains on-chain. |
+| RPC and heartbeat transport | Keeper and dashboard HTTP reads have per-attempt deadlines, streamed body limits, caller-abort propagation and redirect refusal. Heartbeat requests have a separate two-second limit. Oversized data fails closed. |
+| Signed Risk Rooms | A separate wrapper verifies strict Ed25519 signatures over canonical bounded commands, immutable identity/domain bindings, actor sequences, expiry and current delegation revisions. Paper economics, custody and oracle assumptions remain separate. |
 | CI | Offline keeper and dashboard regressions, TypeScript checking and the dashboard production build join the existing Rust, secret-scan, SBF build and LiteSVM checks. |
 
 The admin handshake uses the existing `Exchange.pending_admin` field, preserves
@@ -33,6 +36,16 @@ an already-lost admin key.
 Keep `DRY_RUN` enabled during initial observation. Invalid boolean or numeric
 settings fail at startup. See [keeper configuration](../keeper/README.md) for the
 current environment variables and scan-coverage settings.
+
+RPC attempts default to ten seconds and 16 MiB for the complete body, with a JSON
+depth cap of 128. Configure `RPC_TIMEOUT_MS` within 1–30,000 and
+`RPC_MAX_RESPONSE_BYTES` within 1–67,108,864. HTTP 429 retains web3's bounded retry
+schedule, so one RPC operation can take up to five attempts plus 7.5 seconds of
+backoff (57.5 seconds at the default timeout). These are per-attempt limits, not
+global concurrency control, pagination or WebSocket deadlines. Oversized books
+are rejected in full; records are never silently truncated. Successful JSON-RPC
+response bytes, including simulation error data, are preserved. Fixed transport
+errors do not sanitize arbitrary strings inside a valid provider response.
 
 Preserve `keeper/.state.json` on persistent storage. It is bound to the cluster's
 genesis hash, program ID and keeper wallet, and holds spending, scan position and
@@ -122,7 +135,10 @@ change. A host test alone does not verify the deployed runtime.
 5. **Dependency remediation.** The Hermes/Zod network parsing path was replaced
    and Mocha's vulnerable serializer patched. As checked on 2026-11-02, root
    `npm audit` reports 7 high / 11 moderate; the production-only root graph has
-   7 high / 8 moderate; dashboard has 2 high / 5 moderate. These are affected
+   7 high / 8 moderate; dashboard has 2 high / 5 moderate. On 2026-11-03, moving
+   SPL Token to development-only fixture dependencies and using verified ATA PDA
+   derivation removes `bigint-buffer` from the keeper's production graph. The
+   production-only root audit now reports 4 high / 6 moderate. These are affected
    package entries, including inherited effects, not unique exploit counts.
    Remaining paths are analyzed below. Re-run audit when evaluating a release;
    replacements or breaking upgrades need compatibility testing, not forced
@@ -144,7 +160,7 @@ uses of these packages.
 | Remaining family | Current use and limit of the assessment |
 |---|---|
 | Anchor → `toml@3.0.0` (high) | Anchor's workspace loader parses the local `Anchor.toml`. The keeper/dashboard instantiate `Program` from tracked IDL and do not use `anchor.workspace`; the initialization test does. No remote TOML-input path was found. The current Anchor range cannot adopt TOML 5 as a compatible patch. |
-| SPL Token → `bigint-buffer@1.1.5` (high) | Keeper use is associated-token-address derivation; reviewed SPL layouts decode fixed-width integers. No arbitrary-length native decode input was found in those paths. There is no patched upstream version. A local fallback to pure JavaScript is not a deployment mitigation. |
+| SPL Token → `bigint-buffer@1.1.5` (high, now development-only) | Network fixture scripts retain SPL Token. Production keeper ATA derivation uses the official owner/token-program/mint PDA seeds through web3, independently checked against the SDK for both token programs. `npm ls --omit=dev` has neither SPL Token nor bigint-buffer. The upstream advisory is not patched in the development graph. |
 | web3/jayson → `stream-json@1.9.1` (moderate) | web3 uses Jayson's browser HTTP client, not the affected server streaming/filter/assembler interfaces. No affected streaming path was found. |
 | jayson → `uuid@8.3.2` (moderate) | The observed caller uses `v4()` without a caller-supplied buffer; the advisory concerns other version functions and buffer handling. |
 | Mocha → glob/minimatch (moderate, development) | Test patterns come from checked-in commands. Mocha's current dependency ranges do not accept the patched major versions. These packages are absent from the production dependency audit. |
