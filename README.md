@@ -7,7 +7,7 @@
 
 Permissionless oracle-and-pool perpetual futures on Solana.
 
-**Source reviewed 2026-11-02:** a devnet protocol prototype with implemented
+**Source reviewed 2026-11-03:** a devnet protocol prototype with implemented
 trading and liquidation paths, still incomplete and unaudited.
 The latest recorded deployment is `devnet-v0.7.0` (2026-08-26).
 A read-only check on 2026-10-29 confirmed that the devnet program exists and is
@@ -18,6 +18,14 @@ It includes wallet-free paper tests, a compiled-program simulator, exact build
 manifests, known limitations and reporting requirements. Public launch is pending
 a verified private reporting channel and an assigned responder. There is no
 funded bounty. The shared devnet deployment is not this challenge's target.
+
+**Next security milestone, 2026-11-03:** [signed Risk Rooms commands](crates/rooms-auth/README.md)
+bind real Ed25519 authorization to a fixed identity registry, exact action,
+expiry, replay sequence and current delegation revision. The keeper/dashboard
+now bound complete HTTP responses and heartbeat waits. Funding rates are sampled
+prospectively after migrated position changes, so a new book cannot inherit the
+previous book's rate. These are source changes; custody, trusted live oracle
+adapters, LP exit design and independent assurance remain open.
 
 | Area | Implemented | Remaining work |
 |---|---|---|

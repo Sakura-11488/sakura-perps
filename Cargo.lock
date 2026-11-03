@@ -2518,7 +2518,18 @@ dependencies = [
 name = "sakura-perps-rooms"
 version = "0.1.0"
 dependencies = [
+ "borsh 1.8.0",
  "sakura-perps-risk",
+]
+
+[[package]]
+name = "sakura-perps-rooms-auth"
+version = "0.1.0"
+dependencies = [
+ "borsh 1.8.0",
+ "ed25519-dalek",
+ "sakura-perps-rooms",
+ "sha2 0.10.9",
 ]
 
 [[package]]
