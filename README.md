@@ -7,7 +7,7 @@
 
 Permissionless oracle-and-pool perpetual futures on Solana.
 
-**Source reviewed 2026-11-03:** a devnet protocol prototype with implemented
+**Source reviewed 2026-11-04:** a devnet protocol prototype with implemented
 trading and liquidation paths, still incomplete and unaudited.
 The latest recorded deployment is `devnet-v0.7.0` (2026-08-26).
 A read-only check on 2026-10-29 confirmed that the devnet program exists and is
@@ -19,13 +19,24 @@ manifests, known limitations and reporting requirements. Public launch is pendin
 a verified private reporting channel and an assigned responder. There is no
 funded bounty. The shared devnet deployment is not this challenge's target.
 
-**Next security milestone, 2026-11-03:** [signed Risk Rooms commands](crates/rooms-auth/README.md)
+**Signed-command milestone, 2026-11-03:** [signed Risk Rooms commands](crates/rooms-auth/README.md)
 bind real Ed25519 authorization to a fixed identity registry, exact action,
 expiry, replay sequence and current delegation revision. The keeper/dashboard
 now bound complete HTTP responses and heartbeat waits. Funding rates are sampled
 prospectively after migrated position changes, so a new book cannot inherit the
 previous book's rate. These are source changes; custody, trusted live oracle
 adapters, LP exit design and independent assurance remain open.
+
+**Browser paper pilot, 2026-11-04:** [Rooms](docs/rooms-paper-pilot.md) now has
+Plan, My allocation and Review screens, backed by the actual Rust accounting
+engine compiled to WASM. One local paper identity signs a fixed SOL scenario;
+complete action batches are saved in strict IndexedDB transactions before the
+client acknowledges them. Recovery verifies plan/genesis binding and replays
+every signed record. This is a single-device experiment: no connected wallet,
+real funds, shared rooms or live price feed. Clearing browser storage loses the
+local record and key; a valid older database snapshot cannot be detected without
+an independently retained checkpoint. See the [public integration package](integrations/sakura-rooms/README.md)
+for build and browser-test commands. This source addition is not a web deployment.
 
 | Area | Implemented | Remaining work |
 |---|---|---|
@@ -37,6 +48,7 @@ adapters, LP exit design and independent assurance remain open.
 | Administration | Admin-gated feed qualification and risk controls; two-step rotation implemented in source | Deploy and rehearse rotation; multisig/timelock governance and audit |
 | Dashboard | Read-only devnet monitor with bounded API errors and explicit unknown observations | Operational validation; reference oracle checks are not live-market acceptance |
 | App integration | IDL, generated types and keeper clients | Reusable SDK and integration with this protocol; Sakura's current app uses Phoenix |
+| Rooms paper pilot | Three browser screens, Rust WASM accounting, signed fixed scenario and local journal recovery | Shared identity/custody/oracles, external rollback checkpoints and production assurance |
 
 The default Hermes endpoint returned `401 Unauthorized` again during the
 2026-10-29 read-only check. A configured endpoint may resolve access, but the
@@ -140,6 +152,8 @@ Versions must match. If yours differ, expect failure.
 | Host Rust | 1.89.0 |
 | SBF platform-tools | v1.54 (bundled with Agave 4.1.2) |
 | Node | 22 |
+| Rooms browser target | `wasm32-unknown-unknown` |
+| Rooms bindings CLI | `wasm-bindgen-cli` 0.2.126 |
 
 These are the repository's supported versions. Other combinations need their
 own compatibility checks:
@@ -432,7 +446,9 @@ requests targeting `main`, and manual dispatch:
 |---|---|
 | Risk math and properties | `cargo test -p sakura-perps-risk --locked`, including `proptest` |
 | Program host tests | `cargo test -p sakura-perps --lib --locked` |
-| Program build | `anchor build`; program ID check and artifact checksum |
+| Paper kernel, authentication and browser facade | `scripts/security-challenge.sh paper`; host tests and signed examples |
+| Rooms browser integration | Fresh Rust WASM build, package allowlist/hashes, TypeScript, Chromium screen and journal-recovery tests |
+| Program build | `cargo-build-sbf` with platform-tools v1.54, separate Anchor IDL generation, program ID check and artifact checksum |
 | SVM integration | LiteSVM against the compiled artifact from the build job |
 | Static checks | rustfmt, clippy, secret scanning and source guardrails |
 | Keeper/client checks | TypeScript checking and offline security regressions |
@@ -707,8 +723,9 @@ Milestones describe implementation and remaining work, not a completion percenta
 | 9 — TypeScript SDK and app integration | Pending; IDL and internal clients exist | Reusable SDK and a Sakura integration with this program |
 | 10 — hardening and audit preparation | Source batches: admin rotation, keeper persistence/budgets/coverage, dashboard safeguards, bound trade intents and LP containment | Economic design, deployment rehearsal, dependency remediation, governance, fuzzing, reproducible-build validation and independent audit |
 
-The community Risk Rooms work is a separate paper experiment. It does not
-advance the live protocol's deployment, SDK or audit milestones by itself.
+The community Risk Rooms browser pilot is a separate paper experiment. Its
+Plan, My allocation and Review flow does not advance the live protocol's
+deployment, SDK or audit milestones by itself.
 
 Sakura's current Expo trading screen uses Phoenix. It is not an integration with
 this program; the interface does not establish completion of milestone 9.

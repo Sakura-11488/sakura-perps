@@ -41,6 +41,7 @@ env:
   SOLANA_VERSION: "4.1.2"
   ANCHOR_VERSION: "1.1.2"
   SBF_TOOLS_VERSION: "v1.54"
+  WASM_BINDGEN_VERSION: "0.2.126"
 
 jobs:
   javascript:
@@ -79,6 +80,70 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run build
+
+  rooms:
+    name: Rooms browser paper pilot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: integrations/sakura-rooms/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1 # master @ 2024-10
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        with:
+          key: rooms-web
+
+      - name: Install pinned WASM bindings tool
+        run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
+
+      - name: Install browser test dependencies
+        working-directory: integrations/sakura-rooms
+        run: |
+          npm ci --ignore-scripts
+          npm exec -- playwright install --with-deps chromium
+
+      - name: Verify the shipped browser engine and integration
+        run: |
+          node scripts/package-rooms.mjs check
+          npm --prefix integrations/sakura-rooms run typecheck
+          npm --prefix integrations/sakura-rooms test
+          mkdir -p target/security-challenge
+          node scripts/challenge-manifest.mjs --rooms > target/security-challenge/rooms-shipped-manifest.json
+
+      - name: Build the actual Rust engine and verify the public package
+        run: |
+          scripts/build-rooms-web.sh
+          node scripts/package-rooms.mjs check
+
+      - name: Typecheck and exercise recovery and screens with the fresh engine
+        working-directory: integrations/sakura-rooms
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Record browser build and source hashes
+        run: |
+          mkdir -p target/security-challenge
+          node scripts/challenge-manifest.mjs --rooms > target/security-challenge/rooms-manifest.json
+
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: rooms-paper
+          path: |
+            integrations/sakura-rooms/engine-manifest.json
+            integrations/sakura-rooms/web/public/rooms-engine/
+            target/security-challenge/rooms-manifest.json
+            target/security-challenge/rooms-shipped-manifest.json
+          if-no-files-found: error
 
   lint:
     name: Lint and secret scan
