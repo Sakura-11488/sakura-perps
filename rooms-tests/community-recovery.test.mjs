@@ -119,7 +119,7 @@ test('committed allocation with lost HTTP acknowledgement retries the same durab
 test('an aborted IndexedDB pending save sends no mutation and consumes no admission', { timeout: 60_000 }, async () => {
   await fixture(async f => {
     const actor = await f.actor(); let commands = 0;
-    actor.page.on('request', request => { if (request.url().endsWith('/api/rooms/v1/command')) commands++; });
+    actor.page.on('request', request => { if (request.url().endsWith('/api/rooms/v1/command/')) commands++; });
     const original = await profile(actor.page);
     await actor.page.evaluate(() => {
       const put = IDBObjectStore.prototype.put;
@@ -156,11 +156,11 @@ test('service identity change and valid historical rollback fail closed without 
     const historical = { version: 1, serviceId: f.server.serviceId, roomId: room.roomId, events: events(f, room.roomId) };
     await approve(actor, room);
     const original = await profile(actor.page);
-    await actor.context.route('**/api/rooms/v1/command', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(historical) }));
+    await actor.context.route('**/api/rooms/v1/command/', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(historical) }));
     await assert.rejects(() => actor.page.evaluate(id => window.communityClient.refreshCommunity(id), room.roomId));
     assert.deepEqual(await profile(actor.page), original);
-    await actor.context.unroute('**/api/rooms/v1/command');
-    await actor.context.route('**/api/rooms/v1/info', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ version: 1, serviceId: '12'.repeat(32) }) }));
+    await actor.context.unroute('**/api/rooms/v1/command/');
+    await actor.context.route('**/api/rooms/v1/info/', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ version: 1, serviceId: '12'.repeat(32) }) }));
     await assert.rejects(() => actor.page.evaluate(() => window.communityClient.connectCommunity()), /verification/i);
     assert.deepEqual(await profile(actor.page), original);
   });
@@ -173,7 +173,7 @@ test('competing tabs cannot replace another tab\'s durable prepared mutation', {
     await second.evaluate(() => window.communityClient.connectCommunity());
     let intercepted;
     const blocked = new Promise(resolve => { intercepted = resolve; });
-    await actor.context.route('**/api/rooms/v1/command', async route => {
+    await actor.context.route('**/api/rooms/v1/command/', async route => {
       if (route.request().postDataJSON()?.command.type === 'create_invite') { intercepted(); await route.abort('failed'); }
       else await route.continue();
     });
@@ -182,7 +182,7 @@ test('competing tabs cannot replace another tab\'s durable prepared mutation', {
     const pending = await profile(actor.page);
     await assert.rejects(() => second.evaluate(id => window.communityClient.createCommunityInvite(id), room.roomId), /pending|Recover/i);
     assert.deepEqual(await profile(second), pending);
-    await actor.context.unroute('**/api/rooms/v1/command');
+    await actor.context.unroute('**/api/rooms/v1/command/');
     const restored = await second.evaluate(() => window.communityClient.recoverCommunityPending());
     assert.equal(restored.pending, false); assert.match(restored.inviteUrl, /#room=/);
     assert.equal(events(f, room.roomId).filter(event => event.request.command.type === 'create_invite').length, 1);
@@ -198,7 +198,7 @@ test('simultaneous tabs starting from one profile revision admit exactly one pre
     // Release those checks together so the actual strict IDB CAS decides.
     let arrived = 0, release;
     const barrier = new Promise(resolve => { release = resolve; });
-    await actor.context.route('**/api/rooms/v1/info', async route => {
+    await actor.context.route('**/api/rooms/v1/info/', async route => {
       if (arrived < 2) { arrived++; if (arrived === 2) release(); await barrier; }
       await route.continue();
     });
@@ -214,7 +214,7 @@ test('simultaneous tabs starting from one profile revision admit exactly one pre
 test('an unsigned proxy 4xx cannot erase a committed pending request; only its exact receipt recovers it', { timeout: 60_000 }, async () => {
   await fixture(async f => {
     const actor = await f.actor(), room = await publish(f, actor);
-    await actor.context.route('**/api/rooms/v1/command', async route => {
+    await actor.context.route('**/api/rooms/v1/command/', async route => {
       if (route.request().postDataJSON()?.command.type === 'create_invite') {
         const actual = await route.fetch(); assert.equal(actual.status(), 200);
         await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { code: 'FORBIDDEN' } }) });
@@ -224,7 +224,7 @@ test('an unsigned proxy 4xx cannot erase a committed pending request; only its e
     const pending = await profile(actor.page); assert.equal(pending.pending.packet.command.type, 'create_invite');
     const requestId = pending.pending.packet.requestId;
     assert.equal(events(f, room.roomId).filter(event => event.request.requestId === requestId).length, 1);
-    await actor.context.unroute('**/api/rooms/v1/command');
+    await actor.context.unroute('**/api/rooms/v1/command/');
     await f.restart();
     const recovered = await actor.page.evaluate(() => window.communityClient.recoverCommunityPending());
     assert.equal(recovered.pending, false); assert.match(recovered.inviteUrl, /#room=/);
@@ -259,10 +259,10 @@ test('a signed own-record revocation pins a stronger checkpoint than old shared 
     assert.equal(revokedView.members.find(item => item.publicKey === member.session.publicKey).status, 'revoked');
     const preserved = await profile(member.page);
     assert.ok(preserved.checkpoints[room.roomId].some(point => point.count > historical.events.length));
-    await member.context.route('**/api/rooms/v1/command', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(historical) }));
+    await member.context.route('**/api/rooms/v1/command/', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(historical) }));
     await assert.rejects(() => member.page.evaluate(id => window.communityClient.refreshCommunity(id), room.roomId));
     assert.deepEqual(await profile(member.page), preserved);
-    await member.context.unroute('**/api/rooms/v1/command');
+    await member.context.unroute('**/api/rooms/v1/command/');
     const settled = await member.page.evaluate(room => window.communityClient.runCommunityScenario(room.roomId, room.head), revokedView);
     assert.equal(settled.members.find(item => item.publicKey === member.session.publicKey).phase, 'settled');
     const ownExport = JSON.parse(await member.page.evaluate(id => window.communityClient.exportCommunityRecord(id), room.roomId));

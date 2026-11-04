@@ -71,7 +71,7 @@ export async function runCommunityBrowserFlow({ appDist = path.join(root, 'targe
     const pageErrors = [];
     for (const page of [host, member]) { page.setDefaultTimeout(25_000); page.on('pageerror', error => pageErrors.push(error.message)); }
     const url = `${server.origin}/app/perps/community`;
-    const infoPattern = '**/api/rooms/v1/info';
+    const infoPattern = '**/api/rooms/v1/info/';
     await contexts[0].route(infoPattern, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'FIXTURE_OUTAGE' } }) }));
     await host.goto(url);
     await expect(surface(host).getByRole('heading', { name: /A shared idea/ })).toBeVisible();
@@ -135,12 +135,12 @@ export async function runCommunityBrowserFlow({ appDist = path.join(root, 'targe
         await route.abort('failed');
       } else await route.continue();
     };
-    await contexts[1].route('**/api/rooms/v1/command', dropAcknowledgement);
+    await contexts[1].route('**/api/rooms/v1/command/', dropAcknowledgement);
     await surface(member).getByRole('button', { name: 'Approve my allocation', exact: true }).click();
     await expect(surface(member).getByRole('alert')).toBeVisible();
     await expect(surface(member).getByRole('button', { name: 'Recover pending action', exact: true })).toBeVisible();
     assert.equal(dropped, true);
-    await contexts[1].unroute('**/api/rooms/v1/command', dropAcknowledgement);
+    await contexts[1].unroute('**/api/rooms/v1/command/', dropAcknowledgement);
     await surface(host).getByRole('button', { name: 'Refresh shared history', exact: true }).click();
     await expect(surface(host).locator(`[data-member="${memberKey}"]`)).toContainText('10 credits · short · 3×');
     await expect(surface(host).locator(`[data-member="${memberKey}"]`)).toContainText('Allocation approved');

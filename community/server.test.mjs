@@ -260,7 +260,7 @@ test('corrupted journal or receipt indexes stop service reopening without resett
   assert.ok(room.roomId);
 });
 
-test('origin, host, request encoding and streamed size guards reject untrusted transport', async () => {
+test('exact slash aliases, origin, host, encoding and size guards preserve strict transport', async () => {
   await fixture(async f => {
     assert.equal((await post(f.server, {}, { headers: { origin: 'https://attacker.example' } })).status, 403);
     const wrongHost = await new Promise((resolve, reject) => {
@@ -272,7 +272,24 @@ test('origin, host, request encoding and streamed size guards reject untrusted t
     assert.equal((await post(f.server, {}, { headers: { cookie: 'anything=1' } })).status, 400);
     assert.equal((await post(f.server, {}, { body: Buffer.from([123, 34, 0xff, 34, 58, 49, 125]) })).status, 400);
     assert.equal((await post(f.server, {}, { body: 'x'.repeat(513 * 1024) })).status, 413);
-    assert.equal((await fetch(`${f.server.origin}/api/rooms/v1/info?room=leak`)).status, 404);
+    for (const suffix of ['info', 'info/']) {
+      const response = await fetch(`${f.server.origin}/api/rooms/v1/${suffix}`, { redirect: 'error' });
+      assert.equal(response.status, 200); assert.equal(response.headers.get('location'), null);
+      assert.equal((await response.json()).serviceId, f.server.serviceId);
+    }
+    const room = await create(f);
+    for (const suffix of ['command', 'command/']) {
+      const response = await fetch(`${f.server.origin}/api/rooms/v1/${suffix}`, { method: 'POST', redirect: 'error', headers: { origin: f.server.origin, 'content-type': 'application/json' }, body: JSON.stringify(room.request) });
+      assert.equal(response.status, 200); assert.equal(response.headers.get('location'), null);
+      assert.deepEqual(await response.json(), room.response, 'Both exact aliases preserve the same idempotent receipt');
+    }
+    for (const suffix of ['info?room=leak', 'info/?room=leak', 'info//', 'info/extra']) {
+      assert.equal((await fetch(`${f.server.origin}/api/rooms/v1/${suffix}`, { redirect: 'error' })).status, 404);
+    }
+    for (const suffix of ['command?extra=1', 'command/?extra=1', 'command//', 'command/extra']) {
+      const response = await fetch(`${f.server.origin}/api/rooms/v1/${suffix}`, { method: 'POST', redirect: 'error', headers: { origin: f.server.origin, 'content-type': 'application/json' }, body: JSON.stringify(room.request) });
+      assert.equal(response.status, 404);
+    }
   });
 });
 
