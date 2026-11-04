@@ -27,6 +27,15 @@ prospectively after migrated position changes, so a new book cannot inherit the
 previous book's rate. These are source changes; custody, trusted live oracle
 adapters, LP exit design and independent assurance remain open.
 
+**Invite-only community beta, 2026-11-04:** [Community Rooms](docs/community-rooms-beta.md)
+adds separate browser identities, one-use invitations, independently approved paper
+allocations, and a signed shared history on a durable SQLite service. Members can
+recover interrupted submissions after a service restart; client checkpoints reject
+observed-history rollback. The leader cannot sign for another member. The
+[service runbook](community/README.md) covers private provisioning, backup/restore
+and the remaining operator trust. This is source plus a local preview, not a
+production website deployment or a real-funds release.
+
 **Browser paper pilot, 2026-11-04:** [Rooms](docs/rooms-paper-pilot.md) now has
 Plan, My allocation and Review screens, backed by the actual Rust accounting
 engine compiled to WASM. One local paper identity signs a fixed SOL scenario;

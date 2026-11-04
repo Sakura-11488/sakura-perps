@@ -35,3 +35,11 @@ keeper/.state.json.tmp
 keeper/.state.json.lock
 keeper/.state.json.lock.reclaim
 keeper/HALT
+
+# Community service state and operator credentials never belong in Git.
+community/.state/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*-admission.txt

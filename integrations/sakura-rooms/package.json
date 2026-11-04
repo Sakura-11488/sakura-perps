@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "pretest": "npm run build:test",
-    "test": "node --test ../../rooms-tests/*.test.mjs",
+    "test": "node --test ../../rooms-tests/*.test.mjs ../../community/*.test.mjs",
     "build:test": "node ../../rooms-tests/build.mjs",
     "typecheck": "tsc --noEmit"
   },

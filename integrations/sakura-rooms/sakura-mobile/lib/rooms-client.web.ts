@@ -145,6 +145,9 @@ async function engine(): Promise<Engine> {
   return loading;
 }
 
+// Shared beta reuses the exact pinned Rust engine, not another accounting model.
+export { engine as loadPaperEngine };
+
 async function restore(value: unknown, writable: boolean): Promise<{ data: PublicRoom; session: EngineRoom; key?: CryptoKey }> {
   const data = publicRoom(value, writable);
   const module = await engine();
