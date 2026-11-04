@@ -25,6 +25,7 @@ ready for funds of real value.
 | RPC and heartbeat transport | Keeper and dashboard HTTP reads have per-attempt deadlines, streamed body limits, caller-abort propagation and redirect refusal. Heartbeat requests have a separate two-second limit. Oversized data fails closed. |
 | Signed Risk Rooms | A separate wrapper verifies strict Ed25519 signatures over canonical bounded commands, immutable identity/domain bindings, actor sequences, expiry and current delegation revisions. Paper economics, custody and oracle assumptions remain separate. |
 | Rooms browser pilot | The actual Rust engine runs as WASM. Fixed scenario actions and canonical replay enforce the same rules on entry and recovery. Plan metadata binds to genesis. Complete batches commit under strict IndexedDB durability and a transaction-local compare-and-swap before acknowledgement. |
+| Community paper beta | Separate member signatures, one-use invitation hashes, leader/member authorization, durable SQLite journal and idempotent receipts, browser-retained checkpoints, signed terminal rejections and bounded same-origin transport. This is an invite-only paper service, not live custody or independent consensus. |
 | CI | Keeper/dashboard regressions, TypeScript and dashboard build, plus Rooms browser tests against shipped and fresh WASM, join the Rust, secret-scan, SBF build and LiteSVM checks. |
 
 The admin handshake uses the existing `Exchange.pending_admin` field, preserves

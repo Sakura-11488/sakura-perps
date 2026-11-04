@@ -1,5 +1,11 @@
 # Sakura Rooms — browser paper pilot
 
+The bundle also includes the [invite-only community beta](../../docs/community-rooms-beta.md)
+at `/app/perps/community`. It uses the same Rust engine plus the dedicated
+[`community` service](../../community/README.md). Local-only Rooms remains at
+`/app/perps/rooms`. Community requires a same-origin `/api/rooms/v1/` backend with
+persistent storage; a static export alone cannot provide shared history.
+
 Plan → My allocation → Review, styled for Sakura's existing pink reading room.
 This is a **single-browser paper pilot**: no wallet connection, deposits, live
 orders, synchronized members, or shared pool. The fixed SOL scenario ends at
@@ -152,3 +158,13 @@ The semantic format is `sakura-rooms-paper/1`; do not change replay behavior und
 the same semantic version. A future format needs explicit migration or read-only
 legacy recovery. Content hashes identify the packaged bytes; a matching hash
 is not a claim of an independently reproducible build or an audit.
+
+The shared community wire verifier is authored in `community/protocol.mjs` and
+copied with `node scripts/package-rooms.mjs sync-protocol /absolute/path/to/Sakura`.
+Its adjacent browser declaration uses `.d.mts` for the `.mjs` module. The packaging
+check requires both generated copies to match the reviewed source exactly.
+
+After building the actual Sakura export, the complete community flow can be run
+from the Sakura checkout with `node --test web/test/rooms-community.browser.mjs`.
+It starts a temporary real service/database and uses the sibling `sakura-perps`
+checkout (or the `SAKURA_PERPS_ROOT` override).

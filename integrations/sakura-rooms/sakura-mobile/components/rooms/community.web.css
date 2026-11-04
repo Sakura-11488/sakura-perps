@@ -1,0 +1,38 @@
+.community-page .rooms-heading h1 { max-width: 680px; }
+.community-page .rooms-workspace { align-items: start; }
+.community-join { padding: 24px; border: 1px solid var(--pp-line); border-radius: 6px; background: var(--pp-chip); }
+.community-join .rooms-section-title,.community-create .rooms-section-title { margin-top: 12px; }
+.community-join .rooms-form { gap: 16px; margin-top: 20px; }
+.community-create { padding-top: 36px; margin-top: 36px; border-top: 1px solid var(--pp-line); }
+.community-invites { border-top: 1px solid var(--pp-line); padding-top: 28px; margin-top: 32px; }
+.community-invites h3 { font-size: 18px; font-weight: 500; margin-bottom: 12px; }
+.community-invites .rooms-actions { margin-top: 18px; }
+.community-invite-result { padding: 20px; background: var(--pp-chip); margin-top: 20px; border-radius: 6px; }
+.community-invite-list { list-style: none; padding: 0; margin: 24px 0 0; }
+.community-invite-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--pp-line); padding: 12px 0; }
+.community-invite-list strong { display: block; color: var(--pp-text); font-size: 12px; font-weight: 500; }
+.community-invite-list small { display: block; color: var(--pp-muted); font-size: 11px; margin-top: 5px; }
+.community-aside .community-price-path { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 6px; align-items: center; color: var(--pp-pink); padding: 28px 0 22px; }
+.community-price-path span { text-align: center; }
+.community-price-path strong { display: block; font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.community-price-path small { display: block; color: var(--pp-muted); font-size: 9px; margin-top: 8px; white-space: nowrap; }
+.community-identity { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--pp-line); }
+.community-identity>strong { font-size: 15px; font-weight: 500; display: block; margin: 12px 0; overflow-wrap: anywhere; }
+.community-aside .rooms-details { margin-top: 18px; }
+.community-aside .rooms-facts>div { flex-wrap: wrap; gap: 6px; }
+.community-aside .rooms-facts dd { text-align: left; max-width: 100%; }
+.community-members { border-top: 1px solid var(--pp-line); padding-top: 32px; margin-top: 48px; }
+.community-members h2 { font-size: 24px; font-weight: 500; margin-top: 12px; }
+.community-members .rooms-history-heading { align-items: end; flex-wrap: wrap; }
+.community-member-list { list-style: none; padding: 0; margin: 24px 0 0; }
+.community-member-list li { display: grid; grid-template-columns: minmax(130px,1.15fr) minmax(160px,1.5fr) minmax(135px,1fr) auto; gap: 20px; align-items: center; padding: 24px 0; border-top: 1px solid var(--pp-line); }
+.community-member-list li>div { min-width: 0; }
+.community-member-list strong { display: block; font-size: 13px; font-weight: 500; line-height: 1.7; overflow-wrap: anywhere; }
+.community-member-list small,.community-member-list span { display: block; font-size: 11px; color: var(--pp-muted); line-height: 1.8; }
+.community-member-list .community-result { color: var(--pp-pink); font-size: 18px; font-variant-numeric: tabular-nums; }
+.community-member-list .community-member-name strong { font-size: 15px; }
+.community-members .rooms-details { margin-top: 0; }
+.community-history .rooms-history-heading button { width: auto; min-height: 44px; }
+@media(max-width:1050px) { .community-member-list li { grid-template-columns: minmax(0,1fr) minmax(0,1.25fr) minmax(0,1fr); } .community-member-list li>button { grid-column: 1 / -1; min-height: 32px; padding: 0; } }
+@media(max-width:760px) { .community-aside.rooms-aside { display: block; } .community-aside .community-price-path { max-width: 340px; } .community-members .rooms-history-heading { gap: 16px; } }
+@media(max-width:480px) { .community-page .perps-back { font-size: 11px; gap: 6px; } .community-page .perps-back>span:first-child { font-size: 24px; } .community-page .rooms-header-actions { gap: 4px; } .community-page .rooms-local { max-width: 76px; line-height: 1.5; } .community-join { padding: 20px; } .community-member-list li { grid-template-columns: 1fr 1fr; gap: 16px; } .community-member-list .community-member-name { grid-column: 1 / -1; } .community-member-list .community-result { font-size: 16px; } .community-invite-result { padding: 16px; } .community-create { margin-top: 28px; padding-top: 28px; } }

@@ -27,7 +27,7 @@ if (profile !== 'program') {
 }
 const sourcePaths = git('ls-files', '--cached', '--others', '--exclude-standard', '-z')
   .split('\0').filter(Boolean)
-  .filter(file => /^(programs|crates|idl|scripts|tests|rooms-tests|integrations\/sakura-rooms|keeper\/src|keeper\/test|dashboard\/app|dashboard\/lib|dashboard\/test|\.github\/workflows)\//.test(file)
+  .filter(file => /^(programs|crates|community|idl|scripts|tests|rooms-tests|integrations\/sakura-rooms|keeper\/src|keeper\/test|dashboard\/app|dashboard\/lib|dashboard\/test|\.github\/workflows)\//.test(file)
     || /^keeper\/[^/]+\.ts$/.test(file)
     || ['Cargo.toml', 'Cargo.lock', 'Anchor.toml', 'rust-toolchain.toml', 'package.json', 'package-lock.json', 'tsconfig.json', 'dashboard/package.json', 'dashboard/package-lock.json', 'dashboard/next.config.mjs'].includes(file))
   .sort();
