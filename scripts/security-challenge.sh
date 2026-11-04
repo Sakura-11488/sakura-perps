@@ -22,12 +22,13 @@ cargo test -p sakura-perps-rooms --locked
 cargo run -p sakura-perps-rooms --example community_season --locked
 cargo test -p sakura-perps-rooms-auth --locked
 cargo run -p sakura-perps-rooms-auth --example signed_room --locked
+cargo test -p sakura-perps-rooms-web --locked
 if [[ "$mode" == paper ]]; then
   echo 'Paper checks passed. Use full mode for the compiled Solana program and service tests.'
   exit 0
 fi
 
-for executable in node npm anchor cargo-build-sbf; do
+for executable in node npm anchor cargo-build-sbf wasm-bindgen; do
   command -v "$executable" >/dev/null || { echo "Missing $executable; see docs/security-challenge.md prerequisites." >&2; exit 1; }
 done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 22) { console.error("Node 22 or newer is required"); process.exit(1); }'
@@ -55,5 +56,20 @@ npm run test:keeper
 npm --prefix dashboard ci --ignore-scripts
 npm --prefix dashboard test
 
-node scripts/challenge-manifest.mjs > target/security-challenge/manifest.json
+# Browser tests use a loopback server and the freshly built Rust WASM engine.
+# Chromium installation may download a browser; Linux host libraries are a
+# prerequisite documented separately, rather than installed with sudo here.
+npm --prefix integrations/sakura-rooms ci --ignore-scripts
+(cd integrations/sakura-rooms && npm exec -- playwright install chromium)
+# Exercise the checked-in bytes before replacing them with this host's build.
+node scripts/package-rooms.mjs check
+npm --prefix integrations/sakura-rooms run typecheck
+npm --prefix integrations/sakura-rooms test
+node scripts/challenge-manifest.mjs --rooms > target/security-challenge/rooms-shipped-manifest.json
+scripts/build-rooms-web.sh
+node scripts/package-rooms.mjs check
+npm --prefix integrations/sakura-rooms run typecheck
+npm --prefix integrations/sakura-rooms test
+
+node scripts/challenge-manifest.mjs --full > target/security-challenge/manifest.json
 echo 'Full local checks passed. Build/source manifest: target/security-challenge/manifest.json'

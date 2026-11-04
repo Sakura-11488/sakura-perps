@@ -1,0 +1,21 @@
+{
+  "name": "sakura-rooms-integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "npm run build:test",
+    "test": "node --test ../../rooms-tests/*.test.mjs",
+    "build:test": "node ../../rooms-tests/build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "esbuild": "0.28.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "typescript": "6.0.3"
+  }
+}

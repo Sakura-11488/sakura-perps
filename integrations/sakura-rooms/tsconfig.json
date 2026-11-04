@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@/lib/theme": ["./test-adapters/theme.tsx"],
+      "@/*": ["./sakura-mobile/*"],
+      "expo-router": ["./test-adapters/router.tsx"],
+      "expo-router/head": ["./test-adapters/head.tsx"]
+    }
+  },
+  "include": [
+    "sakura-mobile/app/perps/rooms.web.tsx",
+    "sakura-mobile/components/rooms/*.tsx",
+    "sakura-mobile/lib/*.ts",
+    "test-adapters/*.tsx",
+    "test-adapters/*.d.ts"
+  ]
+}

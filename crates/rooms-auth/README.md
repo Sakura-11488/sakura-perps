@@ -5,6 +5,9 @@ This crate adds a real Ed25519 authorization boundary around the in-memory
 action and the exact terms they signed, then applies that action atomically with
 its replay counter and audit record. It is an off-chain research prototype,
 without token custody, authenticated live oracles, durable storage or consensus.
+The separate [browser paper pilot](../../docs/rooms-paper-pilot.md) persists a
+restricted scenario in IndexedDB around this crate; its local journal still
+requires an independent checkpoint to detect rollback of a valid database.
 
 ```sh
 cargo test -p sakura-perps-rooms-auth --locked

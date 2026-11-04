@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "semanticVersion": "sakura-rooms-paper/1",
+  "rust": "1.89.0",
+  "wasmBindgen": "0.2.126",
+  "javascript": "rooms-591a672beac19cb5d2b8.js",
+  "wasm": "rooms-7e3eb95627a642c01070.wasm",
+  "integrity": "sha256-WRpnK+rBnLXSuKH2Uh0aLf2O4O4iGMbJWNdo8COaF8Y=",
+  "sha256": "7e3eb95627a642c010708ecf0d276b79ae81abaf745d56e5cb1ae74f2fe47b46"
+}

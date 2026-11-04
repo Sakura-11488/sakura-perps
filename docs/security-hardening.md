@@ -1,6 +1,6 @@
 # Security hardening
 
-This tracks security implementation through the 2026-11-03 source batch.
+This tracks security implementation through the 2026-11-04 source batch.
 These are **source changes, not a deployment record**. The documented devnet
 release remains `devnet-v0.7.0`; the new admin instructions require a program
 upgrade before clients can call them. The protocol remains unaudited and is not
@@ -24,12 +24,21 @@ ready for funds of real value.
 | Keeper oracle transport | HTTPS single-feed requests have streamed body/binary caps, a request-and-body deadline, binary/JSON consistency checks, cluster-clock freshness and fixed errors. Receiver verification remains on-chain. |
 | RPC and heartbeat transport | Keeper and dashboard HTTP reads have per-attempt deadlines, streamed body limits, caller-abort propagation and redirect refusal. Heartbeat requests have a separate two-second limit. Oversized data fails closed. |
 | Signed Risk Rooms | A separate wrapper verifies strict Ed25519 signatures over canonical bounded commands, immutable identity/domain bindings, actor sequences, expiry and current delegation revisions. Paper economics, custody and oracle assumptions remain separate. |
-| CI | Offline keeper and dashboard regressions, TypeScript checking and the dashboard production build join the existing Rust, secret-scan, SBF build and LiteSVM checks. |
+| Rooms browser pilot | The actual Rust engine runs as WASM. Fixed scenario actions and canonical replay enforce the same rules on entry and recovery. Plan metadata binds to genesis. Complete batches commit under strict IndexedDB durability and a transaction-local compare-and-swap before acknowledgement. |
+| CI | Keeper/dashboard regressions, TypeScript and dashboard build, plus Rooms browser tests against shipped and fresh WASM, join the Rust, secret-scan, SBF build and LiteSVM checks. |
 
 The admin handshake uses the existing `Exchange.pending_admin` field, preserves
 the account layout and appends error codes after the deployed errors. It changes
 neither the fee recipient nor the program upgrade authority, and cannot recover
 an already-lost admin key.
+
+The [Rooms paper pilot](rooms-paper-pilot.md) is a local browser experiment with
+one operator-controlled identity and fixed prices/slots. Its journal is not
+replicated and cannot detect a valid older database without an independently
+retained checkpoint. Storage clearing can lose the key and records; key loss
+leaves verified history read-only and exportable. A non-extractable local key
+does not protect against hostile same-origin code. These controls do not supply
+custody, live oracle truth, shared-room consensus or a live perpetual market.
 
 ## Operating the keeper after upgrading
 
@@ -98,7 +107,13 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test -p sakura-perps-risk --locked
 cargo test -p sakura-perps --lib --locked
+scripts/security-challenge.sh paper
 ```
+
+The [browser package](../integrations/sakura-rooms/README.md) documents its
+separate WASM build, pinned bindings tool and Chromium prerequisites. Its tests
+run the shipped engine and a fresh build, exercising transaction aborts,
+concurrent-tab writes, key loss, metadata binding and bounded replay.
 
 The [security challenge](security-challenge.md) provides one local entry point
 and a source/build manifest for reproductions. CI additionally builds the SBF

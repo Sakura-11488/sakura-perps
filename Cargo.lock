@@ -2533,6 +2533,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakura-perps-rooms-web"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "sakura-perps-risk",
+ "sakura-perps-rooms",
+ "sakura-perps-rooms-auth",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "sakura-perps-svm-tests"
 version = "0.1.0"
 dependencies = [

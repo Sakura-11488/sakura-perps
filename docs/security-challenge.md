@@ -14,6 +14,10 @@ Risk Rooms uses finite capped contracts; it does not implement a live perp.
 Its [signed-command wrapper](../crates/rooms-auth/README.md) now verifies real
 Ed25519 authorizations. The underlying paper kernel remains available separately
 for economic experiments, with its original asserted-identity assumptions.
+The [browser paper pilot](rooms-paper-pilot.md) adds Plan, My allocation and
+Review screens, Rust WASM accounting and local IndexedDB recovery. Its one local
+identity controls the administrator, member and backer in a known scenario; it
+does not connect a wallet or create shared rooms.
 
 ## Start without a wallet
 
@@ -26,8 +30,8 @@ git rev-parse HEAD
 scripts/security-challenge.sh paper
 ```
 
-The paper command runs the room and signed-wrapper tests, a community season,
-and the signed-room demonstration. It
+The paper command runs the room, signed-wrapper and browser-facade host tests,
+a community season and the signed-room demonstration. It
 needs no Solana installation, wallet, RPC account or environment file. Package
 downloads may need network access. The example asserts rejected attacks as well
 as successful trades; it fails if the expected protections stop working.
@@ -36,6 +40,33 @@ For the compiled Solana program, install the [supported toolchain](../README.md#
 host Rust 1.89.0, Agave 4.1.2, SBF platform-tools v1.54, Anchor CLI 1.1.2 and
 Node 22 with npm. Put rustup's **cargo and rustc** first in `PATH`. Linux may
 also require `pkg-config`, `libssl-dev` and `libudev-dev`.
+Full mode also tests the browser integration. Install the matching WASM target
+and bindings tool before running it:
+
+```sh
+rustup target add wasm32-unknown-unknown --toolchain 1.89.0
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
+```
+
+Chromium is downloaded by full mode. On Linux, install its system libraries
+first using the [integration instructions](../integrations/sakura-rooms/README.md).
+The browser checks use a loopback test server and generated local paper keys.
+They require no Sakura application checkout. For the browser slice alone:
+
+```sh
+npm --prefix integrations/sakura-rooms ci --ignore-scripts
+(cd integrations/sakura-rooms && npm exec -- playwright install chromium)
+node scripts/package-rooms.mjs check
+npm --prefix integrations/sakura-rooms run typecheck
+npm --prefix integrations/sakura-rooms test
+scripts/build-rooms-web.sh
+node scripts/package-rooms.mjs check
+npm --prefix integrations/sakura-rooms run typecheck
+npm --prefix integrations/sakura-rooms test
+```
+
+This exercises the shipped engine before rebuilding and then exercises the
+fresh engine. WASM byte identity across build hosts is not assumed.
 
 ```sh
 scripts/security-challenge.sh full
@@ -43,17 +74,24 @@ scripts/security-challenge.sh full
 
 Full mode runs formatting and clippy, risk and program host tests, builds the
 SBF binary and IDL with locked dependencies, checks the committed ABI, executes
-the LiteSVM transactions against that binary, and tests the keeper and dashboard.
+the LiteSVM transactions against that binary, and tests the keeper, dashboard
+and Rooms browser integration against both the shipped and freshly built WASM.
 It does not start the keeper, submit transactions or read a wallet. Avoid
 `anchor test` and `tests/devnet-*.ts` for this challenge: those are separate
 network-oriented tools.
 
 After success, `target/security-challenge/manifest.json` records the Git commit,
 whether the checkout was dirty, tool versions, source hashes, and hashes of the
-compiled program and generated ABI. Include it with a report. A binary hash
+compiled program, generated ABI and packaged browser engine. Include it with a report. A binary hash
 identifies that build; it is not a claim that all platforms produce identical
-bytes. CI publishes the same manifest with its `program` artifact. Check that
-**all six CI jobs passed**, including the SVM job which runs after the build.
+bytes. The manifest's profile identifies its artifact coverage: default
+`program`, `--rooms` or `--full`. CI publishes separate manifests in its
+`program` and `rooms-paper` artifacts; the latter includes manifests identifying
+both the shipped and fresh CI WASM builds. Full mode also preserves the shipped
+engine manifest at `target/security-challenge/rooms-shipped-manifest.json` before
+rebuilding. The source hashes also cover integration code, browser tests and the
+committed engine assets present when the manifest is generated. Check that
+**all seven CI jobs passed**, including the SVM job which runs after the build.
 The manifest alone is not a test or deployment attestation.
 
 Local validation on 2026-11-02 passed **297 tests**: 107 compiled-program SVM,
@@ -79,6 +117,8 @@ and bounded network operations without changing the launch/intake status above.
 | `crates/risk` | Checked integer arithmetic, rounding, funding carry or settlement fails at a boundary or under an equivalent partition of time. |
 | `crates/rooms` | A delegate exceeds an owner's cumulative budget, spends the same remaining limit twice, accesses another backing cell, changes accepted economics or settles to a different beneficiary. |
 | `crates/rooms-auth` | A wrong key/domain, replay, expired authorization, altered canonical bytes or revoked-and-regranted delegation bypasses signature checks; a failed command consumes a sequence or modifies state; replay accepts a changed transcript against the original trusted head. |
+| `crates/rooms-web` | Canonical signed records bypass the fixed pilot action order, prices or limits during replay; plan/domain substitution is accepted; integer quotes diverge from the kernel's actual result. |
+| `integrations/sakura-rooms` and `rooms-tests` | A failed save is acknowledged, only half an allocation/settlement batch persists, a stale tab overwrites a newer head, corrupted metadata or records recover as valid, or missing signing authority permits another action. |
 | `keeper/src` | Restart, ambiguous broadcast, receipt loss, bad oracle responses or RPC errors bypass the spending reservation, duplicate a send, conceal an unhealthy book or expose credentials. |
 | `dashboard/lib` and `dashboard/app` | Server credentials escape, invalid observations appear healthy, or an upstream failure becomes trusted market information. |
 
@@ -107,9 +147,11 @@ Useful focused commands after a full build:
 cargo test -p sakura-perps-risk --locked
 cargo test -p sakura-perps-rooms --locked
 cargo test -p sakura-perps-rooms-auth --locked
+cargo test -p sakura-perps-rooms-web --locked
 SAKURA_PERPS_SO="$PWD/target/deploy/sakura_perps.so" cargo test -p sakura-perps-svm-tests --locked
 npm run test:keeper
 npm --prefix dashboard test
+npm --prefix integrations/sakura-rooms test
 ```
 
 Add a failing regression beside the closest existing test. LiteSVM fixtures can
@@ -145,15 +187,24 @@ The following are unresolved and are not hidden behind a passing suite:
 - **Funding, liquidation and insolvency need further research.** Funding farms,
   reserve grief, incentives under congestion, insurance and bad-debt recovery
   are not solved by temporal accounting fixes.
-- **Risk Rooms is an in-memory model.** Direct kernel identities are asserted.
+- **Risk Rooms is a paper model.** Direct kernel identities are asserted.
   The signed wrapper authenticates commands against an immutable key registry;
   it does not verify collateral transfers, oracle truth or operator time. Its
   hash chain needs an independently trusted genesis/head checkpoint and complete
-  replay after restart. There is no durable storage, key recovery or consensus.
-  Its administrator supplies immutable
+  replay after restart. The standalone Rust crates hold state in memory. Its
+  administrator supplies immutable
   terminal observations. Missing terminal data locks reserves; there is no
   guaranteed permanent-outage exit. The raw kernel transcript is not a signed
   ledger; wrapper evidence still has the separate trust limits above.
+- **Browser persistence has local trust limits.** The pilot saves complete
+  batches with strict IndexedDB durability and a transaction-local compare-and-swap,
+  acknowledges completion, and verifies bounded replay after reopening. It has
+  no replicated backup or external rollback witness. Storage clearing/eviction
+  can lose records and the local key; a valid older database and its matching
+  head can pass local replay. Key loss leaves verified history read-only and
+  exportable, with no key recovery. Same-origin code can request signatures even
+  though the WebCrypto key is non-extractable. See the
+  [pilot threat model](rooms-paper-pilot.md#limits-of-local-recovery).
 - **Governance and operations remain trusted.** Admin feed qualification,
   mutable risk policy, upgrade authority, RPC availability and keeper operation
   need deployment rehearsal and independent review. Local checks do not prove
