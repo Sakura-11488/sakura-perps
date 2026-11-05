@@ -1,785 +1,134 @@
 # Sakura Perps
 
-> ### ⚠️ Devnet only. Unaudited. Not for real funds.
->
-> This program has not been audited, is not approved for real funds, and is
-> incomplete. Do not deploy it to mainnet. Do not send it money.
+**Plan together. Decide for yourself.**
 
-Permissionless oracle-and-pool perpetual futures on Solana.
+Sakura explores community strategy rooms where each participant controls their
+own allocation and risk. This repository contains the Rooms paper experience,
+its accounting and authorization engines, and a separate Solana perpetuals
+research program.
 
-**Source reviewed 2026-11-04:** a devnet protocol prototype with implemented
-trading and liquidation paths, still incomplete and unaudited.
-The latest recorded deployment is `devnet-v0.7.0` (2026-08-26).
-A read-only check on 2026-10-29 confirmed that the devnet program exists and is
-executable; it did not re-verify its bytecode or run a trade.
+[Try the invite-only paper beta](https://sakuraonseeker.com/app/perps/community/)
+· [Documentation](docs/README.md) · [Roadmap](ROADMAP.md)
+· [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-**Security researchers:** start with the [local security challenge](docs/security-challenge.md).
-It includes wallet-free paper tests, a compiled-program simulator, exact build
-manifests, known limitations and reporting requirements. Public launch is pending
-a verified private reporting channel and an assigned responder. There is no
-funded bounty. The shared devnet deployment is not this challenge's target.
+**Unaudited. No real funds.** The hosted beta uses simulated credits. The Solana
+program is devnet research and is not approved for mainnet or real-value assets.
 
-**Signed-command milestone, 2026-11-03:** [signed Risk Rooms commands](crates/rooms-auth/README.md)
-bind real Ed25519 authorization to a fixed identity registry, exact action,
-expiry, replay sequence and current delegation revision. The keeper/dashboard
-now bound complete HTTP responses and heartbeat waits. Funding rates are sampled
-prospectively after migrated position changes, so a new book cannot inherit the
-previous book's rate. These are source changes; custody, trusted live oracle
-adapters, LP exit design and independent assurance remain open.
+## What exists today
 
-**Invite-only community beta, 2026-11-04:** [Community Rooms](docs/community-rooms-beta.md)
-adds separate browser identities, one-use invitations, independently approved paper
-allocations, and a signed shared history on a durable SQLite service. Members can
-recover interrupted submissions after a service restart; client checkpoints reject
-observed-history rollback. The leader cannot sign for another member. The
-[service runbook](community/README.md) covers private provisioning, backup/restore
-and the remaining operator trust. This is source plus a local preview, not a
-production website deployment or a real-funds release.
+Status recorded **5 November 2026**. Source, test evidence and deployment are
+separate: merging code does not update the hosted website or on-chain program.
 
-**Browser paper pilot, 2026-11-04:** [Rooms](docs/rooms-paper-pilot.md) now has
-Plan, My allocation and Review screens, backed by the actual Rust accounting
-engine compiled to WASM. One local paper identity signs a fixed SOL scenario;
-complete action batches are saved in strict IndexedDB transactions before the
-client acknowledges them. Recovery verifies plan/genesis binding and replays
-every signed record. This is a single-device experiment: no connected wallet,
-real funds, shared rooms or live price feed. Clearing browser storage loses the
-local record and key; a valid older database snapshot cannot be detected without
-an independently retained checkpoint. See the [public integration package](integrations/sakura-rooms/README.md)
-for build and browser-test commands. This source addition is not a web deployment.
-
-| Area | Implemented | Remaining work |
+| Component | Current state | Boundary |
 |---|---|---|
-| Trading | Collateral pools, isolated leveraged positions, owner/admin/emergency closes | Economic hardening and broader operating evidence |
-| Funding and borrow | Historical pool utilization and full-interval migrated accrual, with funding remainder carry | Legacy-book drain, funding-farm mitigation and economic review |
-| Liquidation | Permissionless on-chain liquidation; exercised on devnet on 2026-08-30 | Insurance and bad-debt recovery; debt is currently recorded |
-| Keeper | Off-chain simulation, bounded oracle responses, durable submission and spending reservations | Working price-feed access, a proven pinned-feed refresh, and sustained operation |
-| LP accounting | Share mint/burn; new source blocks deposits/redemptions while the pool has open claims | Liability-aware valuation and bounded LP exit; the temporary guard can lock LPs indefinitely |
-| Administration | Admin-gated feed qualification and risk controls; two-step rotation implemented in source | Deploy and rehearse rotation; multisig/timelock governance and audit |
-| Dashboard | Read-only devnet monitor with bounded API errors and explicit unknown observations | Operational validation; reference oracle checks are not live-market acceptance |
-| App integration | IDL, generated types and keeper clients | Reusable SDK and integration with this protocol; Sakura's current app uses Phoenix |
-| Rooms paper pilot | Three browser screens, Rust WASM accounting, signed fixed scenario and local journal recovery | Shared identity/custody/oracles, external rollback checkpoints and production assurance |
+| [Community Rooms](docs/community-rooms-beta.md) | Invite-only hosted paper beta, released 4 November | Separate browser identities, signed allocations and durable shared history; a fixed scenario, no deposits or live prices |
+| [Local Rooms](docs/rooms-paper-pilot.md) | Single-device paper pilot | Rust WASM accounting and IndexedDB recovery; clearing site data loses signing access |
+| [Risk Rooms](crates/rooms/README.md) | Experimental finite-contract kernel with a [signed gateway](crates/rooms-auth/README.md) | Explicit budgets and separately reserved backing; no token custody or trusted live oracle |
+| [Solana program](programs/sakura-perps/src/lib.rs) | Oracle-and-pool prototype; latest recorded deployment is `devnet-v0.7.0` | Source hardening is newer than that deployment; LP exits, economic policy and independent assurance remain open |
+| [Keeper](keeper/README.md) and [dashboard](dashboard/README.md) | Devnet operational tooling and read-only monitoring | Sustained funded-book operation and pinned-feed refresh still need evidence |
 
-The default Hermes endpoint returned `401 Unauthorized` again during the
-2026-10-29 read-only check. A configured endpoint may resolve access, but the
-keeper's ability to refresh the pinned feed still needs to be demonstrated.
-See [keeper status](keeper/README.md) and [next milestone](#next-milestone).
-Neither the deployed program nor a passing build proves a continuously running
-keeper or production readiness.
+The app's existing Phoenix integration is separate from this research program.
+Rooms does not establish that the Solana protocol is integrated or ready for funds.
 
-**Current focus: security.** The first hardening batch adds durable keeper
-submissions and spending reservations, fair scan coverage, truthful dashboard
-status, and two-step admin rotation. These source changes have not been deployed.
-See [security controls, operating notes and remaining gates](docs/security-hardening.md).
-The next source batch adds historical borrow accounting, funding carry,
-strict recovery-price provenance and bounded Hermes parsing. It also remains
-undeployed. Legacy pools must drain before accepting risk under the new engine.
+## The Rooms experience
 
-**Product direction:** crypto-native communities, teams, strategy and social
-play. A new [Risk Rooms paper prototype](crates/rooms/README.md) makes the proposed
-budget and backing rules executable: each member has owner-controlled limits,
-delegates have restricted authority, and each position names its separately
-funded backing cell. It is a finite capped-contract simulator, not a deployed
-perpetual market or a complete app. See the
-[market research, security evidence and prioritized build plan](docs/research/2026-10-30-perps-direction.md).
+1. **Plan:** join an immutable community strategy plan using a single-use invite.
+2. **My allocation:** approve your own paper allocation. A leader cannot sign for you.
+3. **Review:** compare outcomes against the same scenario and retain signed history.
 
-**Percolator research and implementation, 2026-11-02:** reviewed all six
-`aeyakovenko/percolator*` repositories at pinned commits. Their current branches
-do not constitute one compatible release. Sakura adopts intent binding and
-separation of funded obligations without importing the engine. New source binds
-opens to a risk-policy revision and slot deadline, and closes to a unique
-position generation. The [research report](docs/research/2026-11-02-percolator-and-risk-rooms.md)
-records source evidence, the LP attack traces, rejected approaches and release
-gates. These changes are **undeployed** and do not establish novelty or security
-certification. Open/close instruction arguments changed; regenerate clients
-against the accompanying IDL before any coordinated devnet upgrade.
+The current exercise uses prices **100 → 92 → 104**, 1–100 whole paper credits
+and 1–3× long/short exposure. The midpoint does not execute stops or liquidations.
+These are finite, capped contracts, not a live perpetual market or trading record.
 
-Run the paper community scenario without a wallet or RPC:
-
-```bash
-cargo run -p sakura-perps-rooms --example community_season --locked
-cargo test -p sakura-perps-rooms --locked
-```
-
----
-
-## What this is
-
-Traders open leveraged long or short positions against a shared liquidity pool
-at an oracle-determined price. Liquidity providers deposit collateral, receive a
-share token, and take the other side of every trade in exchange for fees. This is
-the structure Jupiter Perps and GMX use.
-
-Market listing is **permissionless**: anyone may create a market for an asset
-whose price feed has been qualified. A newly created market opens *quarantined*,
-with zero open-interest allowance, until its risk parameters are set.
-
-Permissionless market creation does not authorize trading. Feed qualification
-and risk limits remain security decisions: low variance alone does not establish
-that a feed is trustworthy or its underlying market is deep enough. The oracle
-allowlist is admin-controlled, and new markets remain quarantined until their
-risk parameters are set.
-
-## What this is not
-
-- **Not an order book.** There are no limit orders, no makers and takers, no
-  depth. Pricing comes from an oracle.
-- **Not cross-margin.** Positions are isolated.
-- **Not multi-market yet.** One market to begin with.
-- **Not audited, and not finished.** See [Roadmap](#roadmap).
-
-## Collateral
-
-**USDC**, not SAKURA — a deliberate reversal of the original intent, for two
-measurable reasons:
-
-1. Pyth publishes **no price feed for SAKURA**. Without a USD price there is no
-   margin ratio, and without a margin ratio there is no way to decide who is
-   solvent.
-2. SAKURA has **one DEX pool holding about $52,000**. Moving its price by 2×
-   requires roughly 141 SOL of capital — which is flash-loanable, so the real
-   *cost* is only the swap fee on both legs, on the order of **$65**. Any oracle
-   derived from that pool, however well-engineered, is a $65 oracle. Total depth
-   is also smaller than a single meaningful position, so liquidations could not
-   clear at any price.
-
-Fee discounts for SAKURA holders and boosted LP yield for stakers are proposed
-roles for the token, not implemented features of this program. SAKURA is not the
-collateral backing positions.
-
-Every cluster-varying address — the collateral mint, its token program, the fee
-recipient — is stored in an account, never a compile-time constant.
-
-## Toolchain
-
-Versions must match. If yours differ, expect failure.
-
-| Component | Version |
-|---|---|
-| Anchor CLI | 1.1.2 |
-| `anchor-lang` / `anchor-spl` | 1.1.2 |
-| Agave CLI | 4.1.2 |
-| Host Rust | 1.89.0 |
-| SBF platform-tools | v1.54 (bundled with Agave 4.1.2) |
-| Node | 22 |
-| Rooms browser target | `wasm32-unknown-unknown` |
-| Rooms bindings CLI | `wasm-bindgen-cli` 0.2.126 |
-
-These are the repository's supported versions. Other combinations need their
-own compatibility checks:
-
-- Anchor 1.1.2 requires Rust **1.89**, via its `wincode` dependency.
-- Several crates in `anchor-spl`'s transitive tree now require **edition 2024**,
-  which Rust stabilised in 1.85. Older platform-tools ship Rust 1.84 and die with
-  ``feature `edition2024` is required`` before compiling a line of your code.
-- Agave 4.1.2 defaults to platform-tools **v1.54**, whose Rust is 1.89. The
-  Anchor 1.1.2 prebuilt CLI was observed selecting v1.52 instead, so CI now
-  explicitly selects v1.54 with `cargo-build-sbf` and builds the IDL separately.
-- Do not forward `--tools-version` through `anchor build --`: it can also reach
-  the host IDL compiler, which does not accept the SBF-specific flag.
-
-The Anchor CLI version **must equal** `anchor-lang`. If they drift, account
-discriminators and the generated IDL diverge from what the deployed program
-expects, and the failure appears at runtime rather than at build time.
-
-The host toolchain and the SBF toolchain are **independent**. `rust-toolchain.toml`
-pins the host compiler for `cargo test`, clippy and IDL generation.
-`cargo-build-sbf` ships its own SBF toolchain and ignores that file entirely.
-
-### If `anchor build` fails with ``no such command: `+<toolchain>` ``
-
-Your `cargo` is not the rustup shim. `cargo-build-sbf` invokes
-`cargo +<toolchain> build`, and the `+toolchain` syntax is a rustup feature — a
-standalone Rust installation reads it as a command name and fails. Note that
-`cargo-build-sbf --version` succeeds anyway, so a version check is not proof the
-build will work.
-
-Put rustup's shim first:
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-which cargo   # must be ~/.cargo/bin/cargo, not a standalone install
-which rustc   # must ALSO be ~/.cargo/bin/rustc — see below
-```
-
-### Checking `cargo` alone is not enough, and the failure is unrecognisable
-
-`cargo` spawns `rustc` **by name, from `PATH`**. Invoking the shim explicitly —
-`~/.cargo/bin/cargo test`, or `RUSTUP_TOOLCHAIN=... cargo test` — therefore still
-hands the compile to whatever `rustc` comes first, and a standalone install
-earlier in `PATH` silently wins. `rust-toolchain.toml` is then not in effect for
-a single compiled crate, while `cargo --version` cheerfully reports the pinned
-version.
-
-What that looks like, none of which mentions a toolchain:
-
-- `E0658: use of unstable library feature 'non_null_from_ref'` from
-  `solana-sbpf`. The pinned 1.89 accepts that feature; an older `rustc` does not.
-- `E0514: found crate ... compiled by an incompatible version of rustc`, once an
-  artifact from the other compiler is in `target/`.
-- Hundreds of `use of undeclared type 'Vec'` / `'Clock'` / `'Pubkey'` errors
-  inside dependencies, cascading from the above.
-
-Diagnose with `rustc --version`, not `cargo --version`. And note that
-`cargo clean` appears to fix the E0514s for exactly one run before they return,
-which makes mixed artifacts look like the root cause when they are a symptom —
-that misreading cost a 3.5 GiB rebuild here before the real cause was found.
-
-CI is unaffected: `dtolnay/rust-toolchain` installs via rustup and leaves no
-competing `rustc` on `PATH`. This reproduces only on developer machines carrying
-a standalone Rust alongside rustup.
+The service persists accepted actions in SQLite and the browser retains pending
+requests and verified checkpoints. Recovery tests cover interrupted delivery,
+restarts, invitation races and revocation. The operator and delivered JavaScript
+remain trusted; signing keys are not recoverable from public exports. Read the
+[trust and limits](docs/community-rooms-beta.md#trust-and-limits) before testing.
 
 ## Quickstart
 
-```bash
+Explore the paper model locally with **Rust 1.89.0** installed through rustup:
+
+```sh
 git clone https://github.com/Sakura-11488/sakura-perps.git
 cd sakura-perps
-pnpm install
-cargo-build-sbf --manifest-path programs/sakura-perps/Cargo.toml --tools-version v1.54
-mkdir -p target/idl target/types
-anchor idl build --out target/idl/sakura_perps.json --out-ts target/types/sakura_perps.ts
-SAKURA_PERPS_SO="$PWD/target/deploy/sakura_perps.so" cargo test -p sakura-perps-svm-tests --locked
+scripts/security-challenge.sh paper
 ```
 
-## Devnet
+This runs the Rust Rooms kernels, signed-command checks and examples without a
+wallet, RPC configuration or transactions. Dependency downloads need network
+access. It does not start the hosted service or launch a public security challenge.
 
-| | |
+For the web experience, use the [browser integration guide](integrations/sakura-rooms/README.md).
+For a private local server, use the [community service runbook](community/README.md).
+
+## Repository map
+
+| Path | Purpose |
 |---|---|
-| Cluster | devnet |
-| Program id | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` |
-| Collateral (planned) | Circle USDC-devnet `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` |
-| Oracle receiver | Pyth `rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ` |
-| SOL/USD feed | `7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE` |
+| [`community/`](community/README.md) | Signed HTTP protocol, durable SQLite service and operations |
+| [`crates/rooms/`](crates/rooms/README.md) | Finite-contract paper accounting and backing rules |
+| [`crates/rooms-auth/`](crates/rooms-auth/README.md) | Ed25519 commands, authority and replay checks |
+| [`crates/rooms-web/`](crates/rooms-web/README.md) | Canonical browser facade compiled to WASM |
+| [`integrations/sakura-rooms/`](integrations/sakura-rooms/README.md) | Allowlisted Expo UI/client source and shipped engine assets |
+| [`programs/sakura-perps/`](programs/sakura-perps/) and [`crates/risk/`](crates/risk/) | Solana protocol and fixed-point risk mathematics |
+| [`keeper/`](keeper/README.md), [`dashboard/`](dashboard/README.md), [`idl/`](idl/) | Operational tools and generated client ABI |
+| [`docs/`](docs/README.md) | Design, research, security evidence and historical references |
 
-Note that USDC-devnet is owned by the **legacy** SPL Token program while SAKURA
-is Token-2022. The program uses `anchor_spl::token_interface` throughout so it
-can accept either, and pins whichever it was initialized with.
+The complete application lives in [Sakura](https://github.com/Sakura-11488/Sakura).
+This repository publishes only the allowlisted Rooms integration; private Studio
+source and operator credentials do not belong here. A web release must preserve
+Studio, ATSU restoration and the community service; an app export alone is insufficient.
 
-The plan previously named `Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr`. That is
-a legacy community "USDC-Dev" token whose **mint authority is the mint address
-itself**, so nothing can ever mint it and no faucet for it exists or can exist.
-Circle's devnet USDC is `4zMMC9sr…`, which is what faucet.circle.com dispenses.
+## Toolchain
 
-> **Resolved since `devnet-v0.4.0`: freezable collateral is an explicit opt-in.**
-> `initialize_exchange` still refuses a collateral mint carrying a freeze
-> authority *by default*, which used to make USDC unusable on either cluster —
-> Circle's devnet USDC has one, and so does mainnet USDC
-> (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, authority `7dGbd2QZ…`).
-> `InitializeExchangeParams::allow_freezable_collateral` now lets the admin accept
-> it deliberately, once, with the authority recorded on the `Exchange`
-> (`lib.rs:99`). The default stays closed: a freeze authority is a real power over
-> the vault, so taking it on is a decision someone makes on purpose rather than a
-> default nobody read. The M4 pool round-trip was run against Circle's devnet USDC
-> on this path.
-
-## Deployments
-
-Source-to-bytecode traceability. Every deploy gets a row.
-
-| Cluster | Program id | `.so` sha256 | Tag | Date | Upgrade authority |
-|---|---|---|---|---|---|
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `cb1fee92…f717289c` | `devnet-v0.1.0` | 2026-07-27 | `5JSAncTb…dKP` |
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `569798fe…0e324d47` | `devnet-v0.2.0` | 2026-07-27 | `5JSAncTb…dKP` |
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `7c833439…310bbab3` | `devnet-v0.3.0` | 2026-07-28 | `5JSAncTb…dKP` |
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `5d879e58…07e61d2d` | `devnet-v0.4.0` | 2026-07-28 | `5JSAncTb…dKP` |
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `6abbbf6d…fdba2a87` | `devnet-v0.5.0` | 2026-07-28 | `5JSAncTb…dKP` |
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `668dc905…fe052a80` | `devnet-v0.6.0` | 2026-08-26 | `5JSAncTb…dKP` |
-| devnet | `5Va7HpaA9oRu9cqGXwvqwW3koqE1fBwsGcooFpL6jr2y` | `fcc3a2ba…e6973a1e` | `devnet-v0.7.0` | 2026-08-26 | `5JSAncTb…dKP` |
-
-### Pool round-trip, verified on devnet
-
-`devnet-v0.4.0` against Circle's devnet USDC
-(`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`), run twice by
-`tests/devnet-pool-roundtrip.ts`:
-
-| | Run 1 | Run 2 |
-|---|---|---|
-| `lp_deposit` 2 USDC | 2,000,000 shares | 2,000,000 shares |
-| `request_withdraw` | ok | **ok** |
-| `lp_withdraw` | ok | ok |
-| LP balance after | 2 USDC | 2 USDC |
-| vault after | 18 USDC (unchanged) | 18 USDC (unchanged) |
-
-**Run 2 is the point.** It is the same liquidity provider's *second* withdrawal
-from the same pool. Before the escrow fix that call failed outright — see below.
-
-The vault keeps 18 USDC because the pool is shared and other deposits remain in
-it, including the `MINIMUM_LIQUIDITY` locked forever by the first-ever deposit.
-The invariant asserted is that a complete cycle returns the vault to exactly
-where it started, not that it empties.
-
-### The escrow bug this found
-
-`request_withdraw` creates a `WithdrawRequest` **and** an escrow token account at
-`[b"withdraw_escrow", owner]`. `lp_withdraw` closed only the first, so the escrow
-survived and the owner's next `request_withdraw` failed at account creation
-("already in use") — with no instruction in the program able to clear it. A
-provider could withdraw exactly once, ever, and the rest of their position was
-stranded.
-
-The whole SVM suite was green throughout: every test stopped after a single
-deposit-request-withdraw cycle, so nothing ever attempted a second. The devnet
-round-trip found it on its second run. `a_provider_can_withdraw_twice` now covers
-it, and asserts the escrow account is actually gone between cycles rather than
-inferring it from the next call succeeding.
-
-### `close_stale_escrow`, and the recovery it performed
-
-`lp_withdraw` closes the escrow now, so no new orphans appear — but the ones
-already on chain needed a way out, because nothing in the program could close an
-escrow except `lp_withdraw`, unreachable without `request_withdraw` succeeding
-first. `close_stale_escrow` is that path. Owner-signed, and narrow by design: the
-escrow is addressed by PDA seeds so an owner can only reach their own, and it
-refuses both a non-empty escrow (those shares belong to a live request) and one
-whose `WithdrawRequest` is still open (closing it would strand that request).
-Not gated on `PauseFlags` — a recovery path a pause can disable is not one.
-
-Verified against the real casualty rather than a fixture. The admin wallet
-`5JSAncTb…dKP` had been unable to withdraw since the pre-fix run:
-
-| Step | Result |
+| Component | Supported version |
 |---|---|
-| `close_stale_escrow` on `GesUd6xF…WtED` | escrow closed, 0.002034 SOL rent returned |
-| `request_withdraw` 15,000,000 shares | **succeeded** — the call that had been failing |
-| `lp_withdraw` | 15 USDC returned, 0 shares left |
+| Host Rust | 1.89.0, pinned in `rust-toolchain.toml` |
+| Anchor CLI and Rust libraries | 1.1.2 |
+| Agave / SBF platform-tools | 4.1.2 / v1.54 |
+| Node | 22; community service pinned to 22.23.x |
+| WASM target / bindings CLI | `wasm32-unknown-unknown` / 0.2.126 |
 
-`tests/devnet-close-stale-escrow.ts` and `tests/devnet-withdraw-position.ts`
-reproduce both halves.
-
-**Resolved: `cancel_withdraw`.** A withdrawal request that then cannot complete
-— utilisation rising above `max_utilization_bps` is enough, and a trader can
-cause it — used to strand the shares in escrow with no way back.
-`close_stale_escrow` correctly refuses that case, since the escrow is non-empty
-and the request is live, so it needed a separate instruction rather than a
-loosened guard. `cancel_withdraw` (`lib.rs:229`) returns the escrowed shares and
-closes the request.
-
-### Upgrading needs `program extend` first
-
-Every milestone so far has outgrown its ProgramData allocation, and
-`solana program deploy` fails on size before writing anything. Extend first,
-then deploy. The allocation has gone 183,024 → 524,288 (M4) → 767,472 (M5) →
-**799,704** (permissionless liquidation).
-
-**Size the extend from the CI artifact, never from a local `cargo-build-sbf`
-output.** The two differ — the local build of the same commit came out 716,528
-bytes against the artifact's 799,704 — so a local figure will tell you no extend
-is needed when one is.
-
-```bash
-# M5: 524,288 -> 767,472, the exact size of the new .so
-solana program extend <program-id> 243184 --url "$RPC" -k <deployer>
-solana program deploy target/deploy/sakura_perps.so \
-  --program-id <program-id> --upgrade-authority <deployer> -k <deployer> --url "$RPC"
-```
-
-Two things that cost time here. Pass the program **address** to `--program-id`,
-not a keypair path containing spaces — the CLI rejects that as an "unrecognized
-signer source", and for an upgrade the address is what it wants anyway because
-the upgrade authority is the signer. And `solana program dump` returns the whole
-allocation, so the file is padded with zeros to the full allocation; truncate to
-the `.so` length before comparing hashes or it will never match:
-
-```bash
-solana program dump <program-id> onchain.so --url "$RPC"
-head -c 767472 onchain.so | sha256sum   # == the artifact's sha256
-```
-
-Every deploy since `devnet-v0.3.0` has been verified that way. For
-`devnet-v0.6.0` the on-chain bytes are byte-identical to the CI artifact from
-run 32921524835 (`c058f40`), sha256 `668dc905…fe052a80`.
-
-**Do not deploy through `api.devnet.solana.com`.** It has now failed the bulk
-writes four times on this program, most recently with `Max retries exceeded`;
-`--use-rpc` does not rescue it. Helius completed the identical upload first try.
-Upload the buffer under a keypair **file** —
-`solana program write-buffer <so> --buffer <file>` — so a partial upload resumes
-instead of restarting and re-paying rent. A stranded buffer is reclaimable via
-its *authority* (`solana program close <addr>`), so funds are never at risk even
-if that file is lost.
-
-### Oracle validation, verified on devnet
-
-`devnet-v0.2.0` was checked against the live sponsored Pyth SOL/USD feed
-(`7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE`) in both directions:
-
-| Guards | Result |
-|---|---|
-| normal — 60 s, 100 bps | **accepted**, $75.5164, confidence 3.6 bps, slot age 5 |
-| `max_age` 1 s | rejected |
-| `max_confidence` 1 bps | rejected |
-| `expected_exponent` −6 | rejected |
-| sanity band $1000–2000 | rejected |
-| wrong `feed_id` | rejected |
-
-The rejections are the point. A guard that only ever passes is indistinguishable
-from no guard at all.
-
-At the recorded deployment verification, the dumped on-chain binary matched the
-CI artifact's sha256. That ties the deployed bytes to the source commit named in
-the deployment record; it does not establish byte-for-byte identity with every
-later commit or replace a fresh check of the current deployment.
-
-ProgramData lives at `Cy3X6ZFgt1ELXh4Qnp9NcNrUKRT7U4vQrWq5SFVAdREw`.
-
-Upgrade authority is a single key while on devnet. Before any mainnet
-consideration it moves to a Squads multisig behind a timelock, and there will
-never be an instruction permitting the admin to move funds out of the vault.
-
-### Deploying
-
-The public `api.devnet.solana.com` endpoint is unreliable for program deploys —
-three attempts failed there with "30 write transactions failed", a TPU client
-that could not reach the websocket, and then HTTP 429. Use a dedicated RPC:
-
-```bash
-solana program deploy target/deploy/sakura_perps.so \
-  --program-id target/deploy/sakura_perps-keypair.json \
-  --url "https://devnet.helius-rpc.com/?api-key=YOUR_KEY" \
-  --with-compute-unit-price 50000 --max-sign-attempts 100
-```
-
-Every failed deploy strands a buffer account holding roughly 1 SOL. Reclaim them
-or you will wonder where your devnet balance went:
-
-```bash
-solana program show --buffers --url "$RPC"
-solana program close --buffers --url "$RPC"
-```
+Use both rustup's `cargo` and `rustc`. See the
+[detailed toolchain reference](docs/reference/protocol-development.md#toolchain)
+for compiler setup and compatibility notes.
 
 ## Testing
 
-The [CI workflow](.github/workflows/ci.yml) runs on pushes to `main`, pull
-requests targeting `main`, and manual dispatch:
+[CI](https://github.com/Sakura-11488/sakura-perps/actions/workflows/ci.yml) covers
+seven jobs: keeper/dashboard, Rooms browser/service, lint/secret scanning, risk
+and program host tests, SBF/IDL build, compiled-program SVM tests, and guardrails.
+The Rooms job checks both shipped and freshly built WASM. Review the result for
+the exact commit; a badge or test count is not an audit.
 
-| Check | Implementation |
-|---|---|
-| Risk math and properties | `cargo test -p sakura-perps-risk --locked`, including `proptest` |
-| Program host tests | `cargo test -p sakura-perps --lib --locked` |
-| Paper kernel, authentication and browser facade | `scripts/security-challenge.sh paper`; host tests and signed examples |
-| Rooms browser integration | Fresh Rust WASM build, package allowlist/hashes, TypeScript, Chromium screen and journal-recovery tests |
-| Program build | `cargo-build-sbf` with platform-tools v1.54, separate Anchor IDL generation, program ID check and artifact checksum |
-| SVM integration | LiteSVM against the compiled artifact from the build job |
-| Static checks | rustfmt, clippy, secret scanning and source guardrails |
-| Keeper/client checks | TypeScript checking and offline security regressions |
-| Dashboard checks | Offline security regressions and a production build |
-
-The recorded CI run for commit `07ce580e` passed on 2026-09-05:
-[run 33936923053](https://github.com/Sakura-11488/sakura-perps/actions/runs/33936923053).
-This is recorded CI evidence, not a new test run on the review date.
-There is no nightly schedule, `anchor test` job, Trident job or cargo-fuzz job
-in the current workflow. Adversarial fuzzing remains roadmap work.
-
-LiteSVM matters more than it might appear: it allows writing account data
-directly, which is how oracle staleness, wide confidence intervals, and
-liquidation cascades get tested deterministically in milliseconds instead of
-waiting for a real price to move.
-
-## Milestone 5 — markets and positions
-
-Deployed as `devnet-v0.6.0` (2026-08-26) from CI run `32921524835`. On-chain
-bytes verified byte-identical to the CI artifact, `668dc905…fe052a80`.
-
-ProgramData needed extending 524,288 → 767,472 bytes first (~1.69 SOL,
-permanent). Public devnet failed the bulk writes again with `Max retries
-exceeded` — the fourth such failure — and Helius completed the same upload on
-the first attempt. Deploy via a dedicated RPC, not `api.devnet.solana.com`.
-
-| Stage | What | State |
-|---|---|---|
-| 1 | `crates/risk` pure-function layer | done — `7c6f62c` |
-| 1b | the three holes markets make reachable | done — `40fff01` |
-| 2 | `QualifiedFeed`, `Market`, `Position` layouts | done — `2749aaf` |
-| 3 | the eleven instructions | done — `f6d34ee` |
-| 4 | LiteSVM coverage, then deploy | done — deployed `devnet-v0.6.0` |
-
-Eleven entry points **added by M5**, bringing the program to 20 in total:
-`qualify_feed`, `set_feed_revoked`, `create_market`,
-`set_risk_params`, `set_pool_limits`, `settle_market`, `refresh_market_price`,
-`open_position`, `close_position`, `admin_settle_position`,
-`emergency_close_position`.
-
-### The spec, and why it is written the way it is
-
-[`docs/m5-spec.md`](docs/m5-spec.md) is the historical M5 design specification.
-Later implementation supersedes its status statements. It carries provenance tags
-per section — `[RETAINED]`, `[RECONSTRUCTED]`, `[REVISED]`, `[REVISED ×2]`. The
-original was lost with a cleaned scratchpad before it was ever committed; what is
-there now is a reconstruction that has since been through three adversarial
-refutation passes. Where it strikes an earlier claim as false, that record is
-deliberate. The tags earned their keep: **every blocker the first pass found
-landed in `[RECONSTRUCTED]` text, and every `[RETAINED]` section survived.**
-
-Four blockers shaped the code:
-
-**Booking a fee the vault never took.** `settle_close` takes `close_fee_usd` as
-input and returns `close_fee_quote` as its *clamped* output — zero when equity is
-non-positive. Booking the input made liabilities exceed the vault, so the
-solvency invariant reverted the close and the position became permanently
-unclosable, in a milestone that ships no keeper liquidation. The ledger books
-`settled.close_fee_quote`. Three independent reviewers found this one.
-
-**No exit that survives a dead feed.** All three close paths originally needed a
-passing oracle read, so a feed that stopped publishing — a delisting, an outage,
-or precisely the revocation the design exists for — trapped every position and
-pinned LP capital behind the utilisation ceiling. The original recovery path
-introduced `last_good_price` and a permissionless refresh. The 2026-11-02 source
-now requires a proven strict raw observation and freezes it during quarantine;
-missing legacy provenance fails closed. Historical pricing and permanent-outage
-recovery remain economic policy gates.
-
-**A liquidation fee that could underflow the transfer.** `apply_liquidation_fee`
-clamps twice: against collateral, then against what the close fee left of the
-gross.
-
-**Eight instructions, one account constraint.** Anchor checks the discriminator,
-program ownership and the seeds you write — nothing else. Every other binding was
-an implementer's invention. `has_one = market`, the vault seeds, and the token
-mint and owner pins are now explicit.
-
-### LP flows require a settled pool
-
-Shares price off `pool.quote_deposited`, which ignores what open positions are
-owed. The obvious fix — an aggregate mark — was designed, reviewed, and
-**deleted for cause**: the pool's liability is the sum of
-`max(0, min(equity, cap))` per position, and `max`/`min` do not commute with
-summation. Two longs at +100 and −100 net to zero aggregate PnL while the pool
-genuinely owes the winner 100, so a balanced two-sided book — the normal state of
-a perp DEX — marks to a liability of zero.
-
-No aggregate over `(Σ size, Σ entry_notional)` can compute it. The 20% reserve
-ceiling limits reserved trader profits; it does not bound valuation error from
-unsettled trader losses. The prior claim that it bounded all LP mispricing was
-too broad. A withdrawal delay also does not remove the transfer of value.
-
-The 2026-11-02 source therefore rejects LP minting and redemption whenever
-`locked_quote != 0` or `reserved_quote != 0`. Requests, cancellations and trader
-settlement remain available, and LP flows resume when the book is flat. This
-contains the demonstrated entry/exit pricing paths but can block LPs indefinitely
-if positions remain open. It is not a production exit design. Liability-aware
-valuation, settlement cadence and executable exit guarantees remain release gates.
-
-### Account layouts are size-locked
-
-Every stage-3 field came out of `_reserved` rather than off the end — `Market`
-128→96, `Position` 64→62, `Pool` 120→128 less the inert `min_liquidity_quote`.
-The new market revision/sequence counters reduce `Market::_reserved` from 96 to
-80 bytes, and the position generation reduces `Position::_reserved` from 62 to
-54. Legacy zeros remain valid, with legacy positions using generation 0 and new
-ones starting at 1. Six compile-time `INIT_SPACE` asserts hold the lengths, because growing a struct
-orphans every live devnet account rather than migrating it.
-
-### Compute budget, measured
-
-§9.11 asked for this "before the instruction set is frozen" and stage 3 shipped
-without it. These historical LiteSVM measurements used the `devnet-v0.6.0`
-program bytes: `programs/` and `crates/risk` were unchanged between deployed
-commit `c058f40` and the measurement. They do not measure every instruction in
-the later `devnet-v0.7.0` deployment:
-
-| Instruction | CU | of the 200,000 default |
-|---|---:|---:|
-| `open_position` | 38,905 | 19% |
-| `close_position` | 34,344 | 17% |
-| `emergency_close_position` | 32,694 | 16% |
-| `refresh_market_price` | 9,330 | 4% |
-| `settle_market` | 8,372 | 4% |
-
-The listed fixtures fit within 200,000 compute units.
-`the_position_lifecycle_fits_the_default_compute_budget` asserts that bound for
-these paths, including close settlement with funding and borrow.
-The figures are fixture-specific; permissionless liquidation and transactions
-bundling oracle updates require their own measurements and compute budget.
-
-### What milestone 5 does not settle
-
-Section 9 of the spec records design concerns and historical gaps. Later work
-closed permissionless liquidation and the measured lifecycle compute-budget
-question, and added executable regression coverage. Read the original findings
-with the updated status below. (§9.8 records how review disagreements were
-adjudicated; it is not an open item.)
-
-| | Item | State |
-|---|---|---|
-| 9.11 | compute budget never measured | **closed** — above |
-| 9.1 | M1 is bounded, not closed | open |
-| 9.2 | the multi-hour funding farm | open |
-| 9.3 | the reserve grief is priced, not eliminated | open |
-| 9.4 | no keeper liquidation, load-bearing in two places | **closed** — `liquidate_position` |
-| 9.5 | the staleness option is charged, but not proportionally to age | open |
-| 9.6 | the admin is unrotatable | implemented in source; deployment and operational rehearsal pending |
-| 9.7 | emergency close moves value at a price nobody chose | open |
-| 9.9 | parts still tagged `[RECONSTRUCTED]`, therefore unreviewed | open |
-| 9.10 | regression coverage and test plan | requested regressions now have executable tests; broader adversarial coverage remains |
-
-The recorded devnet release still lacks rotation. The new source implements a
-two-step nomination/acceptance handshake, with cancellation and replacement.
-It requires an upgrade and rehearsal; it does not rotate the program upgrade
-authority or recover a lost admin key. See [the procedure](docs/security-hardening.md#admin-transfer-procedure).
-
-### Permissionless liquidation — closing 9.4
-
-Deployed as `devnet-v0.7.0` (2026-08-26), `.so` sha256 `fcc3a2ba…e6973a1e`,
-verified byte-identical on chain.
-
-`liquidate_position` lets **anyone** close an underwater position and be paid for
-it. It settles identically to `admin_settle_position` — same `LIQUIDATE` pause
-gate, same liquidation oracle guards, same EMA clamp, same snapshotted spread,
-same `is_liquidatable` gate at *current* notional, same two fee clamps in the
-same order — and differs only in that the signer is unconstrained and takes
-`exchange.keeper_fee_share_bps` of the fee.
-
-**The keeper is paid out of the existing fee, never on top of it.** A liquidated
-trader pays what `liquidation_fee_bps` always charged; only the destination of
-part of it changes, so enabling keepers cannot reprice an open position. The
-share is deducted *before* `book_fee`, because `book_fee`'s guarantee is that its
-parts re-sum to what the vault **kept** — booking the whole fee and paying out
-afterwards would credit liabilities the vault no longer backs and break I1.
-
-`keeper_fee_share_bps` came out of `Exchange::_reserved` (96 → 94), so
-`INIT_SPACE` stays 304 and the live exchange needed no reallocation — it read
-**0** from its pre-existing reserve bytes, which is why liquidation became
-permissionless the moment v0.7.0 landed while keepers earned nothing. The last
-recorded devnet configuration is **2000 (20%)**, set via `set_keeper_fee_share`.
-The on-chain cap is `MAX_KEEPER_FEE_SHARE_BPS` (50%); read the exchange account
-before relying on a current payout rate.
-
-Tests cover zero-share equivalence with `admin_settle_position` across every
-payout field and the pool ledger. At a non-zero share, the trader's payout is
-unchanged while the pool books exactly the keeper's share less. The zero-share
-case is a regression fixture, not a claim about the current devnet configuration.
-
-### Permissionless liquidation, exercised on devnet on 2026-08-30
-
-The first recorded permissionless liquidation settled from `DT8fc3LE…3QfY`,
-a wallet unrelated to the position. The gate, account constraints, ledger and
-bad-debt record worked. The position had been unattended for three days, and a
-manual `settle_market` immediately before liquidation advanced its stored indices:
-
-| | before | after |
-|---|---:|---:|
-| `cum_borrow_index` | 25,112 | 61,999,175 |
-| `cum_funding_index` | 0 | 239,930,555 |
-
-By the time it was liquidated, the position was deeply underwater.
-The `PositionClosed` event reported:
-
-    gross_payout_quote     0
-    close_fee_quote        0
-    liquidation_fee_quote  0
-    net_payout_quote       0
-    bad_debt_usd           1,690,280
-
-The keeper paid gas and earned nothing. The trader received nothing. The pool
-absorbed the collateral (`quote_deposited` 8,000,000 → 9,294,495) and recorded
-$1.69 of bad debt in `cum_bad_debt_usd`. Recording that debt does not provide an
-insurance or recovery mechanism.
-
-#### Polling keepers can earn fees without a separate settlement crank
-
-An earlier interpretation of that run incorrectly claimed an uncranked market
-could not be liquidated. This was corrected on 2026-09-01:
-`handle_liquidate_position` calls `accrue` before checking solvency, so both
-simulation and liquidation evaluate the position against the current cluster
-clock even when its stored indices have not moved.
-
-The regression `a_stale_market_index_does_not_stop_a_keeper_being_paid`
-advances six hours with no market interaction, asserts the stored borrow index
-is unchanged, then liquidates with a non-zero fee paid to the keeper and verifies
-that accrual advanced the index.
-
-A polling keeper can therefore earn a fee when it acts while sufficient payout
-remains. This is not a guarantee of profitability: the fee clamps to zero on
-sufficiently underwater positions, as the unattended devnet position demonstrated.
-The run proves permissionless liquidation, not sustained automated operation.
-
-#### Historical settlement truncation and the source correction
-
-The older implementation clamps its interval: `dt = min(elapsed, max_settle_window_seconds)`,
-while `last_settle_ts` still advances to *now*. Elapsed time beyond one window is
-therefore **never charged** — not deferred, forgiven.
-
-An uncranked market silently under-charges borrow interest, and that shortfall is
-the LPs'. A market with a one-hour window left alone for a day collects one hour
-of interest and writes off twenty-three. A settlement cadence protects pool
-revenue; it is not a prerequisite for a polling keeper to earn a liquidation fee.
-The current keeper does not run a settlement crank. In the 2026-11-02 source,
-migrated books instead accrue the full elapsed interval against historical
-utilization, with fractional funding carry. Only the drain-only legacy path
-retains the old truncation. Fresh SVM regressions cover the new behavior.
-
-**Other limits and source corrections.** Liquidation-grade updates could
-previously stamp `market.last_good_price`. The 2026-11-02 source removes those
-writes, records strict provenance and freezes the cache during quarantine.
-Emergency settlement still uses a historical snapshot with no freshness gate.
-Nothing relates `maintenance_margin_bps` to
-`liquidation_max_confidence_bps + spread_bps`, leaving a band where an owner's own
-`close_position` reverts while a keeper succeeds.
+The [contributor guide](CONTRIBUTING.md#validation) lists focused commands.
+[`scripts/security-challenge.sh full`](docs/security-challenge.md#start-without-a-wallet)
+is the comprehensive local entry point after installing its prerequisites.
 
 ## Roadmap
 
-Milestones describe implementation and remaining work, not a completion percentage.
-
-| Milestone | State | Remaining work |
-|---|---|---|
-| 1 — repo, CI, first devnet deploy | Implemented | Ongoing maintenance |
-| 2 — fixed-point risk core and property tests | Implemented | Broader adversarial validation |
-| 3 — oracle validation | Implemented | Keeper-controlled refresh still needs live proof |
-| 4 — collateral vault | Implemented; source restricts LP flows to a settled pool | Liability-aware valuation and bounded LP exits |
-| 5 — positions and isolated margin | Deployed in `devnet-v0.6.0` | Economic hardening |
-| 6 — funding and borrow fees | Historical utilization and full-interval accrual implemented in source | Legacy drain, funding-farm mitigation and economic review |
-| 7 — liquidation, insurance and bad debt | Partial: liquidation deployed in `devnet-v0.7.0`; bad debt recorded | Insurance/recovery and remaining economic risks |
-| 8 — liquidation keeper | Implemented for devnet; operation not fully demonstrated | Price-feed access, verified refresh, paid automated liquidation and operating history |
-| 9 — TypeScript SDK and app integration | Pending; IDL and internal clients exist | Reusable SDK and a Sakura integration with this program |
-| 10 — hardening and audit preparation | Source batches: admin rotation, keeper persistence/budgets/coverage, dashboard safeguards, bound trade intents and LP containment | Economic design, deployment rehearsal, dependency remediation, governance, fuzzing, reproducible-build validation and independent audit |
-
-The community Risk Rooms browser pilot is a separate paper experiment. Its
-Plan, My allocation and Review flow does not advance the live protocol's
-deployment, SDK or audit milestones by itself.
-
-Sakura's current Expo trading screen uses Phoenix. It is not an integration with
-this program; the interface does not establish completion of milestone 9.
-
-### Next milestone
-
-Complete the [security release gates](docs/security-hardening.md#remaining-release-gates),
-starting with LP liability valuation and emergency-price policy. In parallel,
-demonstrate a reliably operating devnet market:
-
-1. Configure accessible `HERMES_URL` / `HERMES_AUTH` values and run
-   `npm run keeper:preflight`.
-2. Run `npm run keeper:verify-push` in dry-run mode, then an explicitly enabled devnet
-   push. Verify that both `publish_time` and `posted_slot` advance.
-3. Exercise a controlled position lifecycle and automated liquidation, verifying
-   position closure, the keeper payout, and pool accounting.
-4. Verify historical accrual and observe the keeper through stale-feed,
-   healthy-position and failure scenarios.
-
-Before mainnet, deploy and rehearse admin rotation, resolve LP liability valuation,
-insurance/recovery and the remaining economic risks, then complete independent
-review and audit.
-No mainnet launch date is established.
+Our immediate phase is a small invited cohort: complete real user sessions,
+improve recovery and reporting, and automate encrypted off-host backups with a
+restore drill. Realistic market-data paper sessions follow explicit pricing and
+outage specifications. Protocol economics and independent assurance proceed as
+separate gates. See the [acceptance criteria](ROADMAP.md); no mainnet date is set.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md). No audit, no bug bounty yet. Private intake must be
-configured before inviting public reports; the previously listed mailbox was
-unverified. The current challenge and good-faith research terms cover your own
-local simulator or validator with simulated assets; they do not authorize attacks
-on shared services or the older devnet deployment.
+[SECURITY.md](SECURITY.md) is the source of truth for reporting. A private channel
+and assigned responder must be verified before announcing the local research
+challenge. There is no independent audit, funded bounty or response-time promise.
+Do not publish exploit details in ordinary issues or test shared infrastructure.
 
-## History
+## History and license
 
-This repository previously contained a fee router and a crank bot, preserved
-under the tag `archive/fee-router-v0`. That code never compiled, could never have
-worked (it used legacy SPL Token types against a Token-2022 mint), and was never
-deployed to any cluster. Its crank bot decided whether to act by calling
-`Math.random()`.
+[Historical protocol development](docs/reference/protocol-development.md) preserves
+deployment records, commands, account-layout notes and previous milestones.
+[Research](docs/README.md#research-and-provenance) records prior art and remaining
+questions; it does not establish novelty or certify security.
 
-None of it is part of this project. It is kept for provenance, not reference.
-
-## License
-
-[Business Source License 1.1](LICENSE). Source-available: you may read, audit,
-modify and run it on any test cluster. Running a production trading venue with it
-requires a commercial licence until the change date of **2030-07-27**, when it
-converts to Apache-2.0.
+[Business Source License 1.1](LICENSE), with the additional use grant stated there.
+This is source-available software. Production trading use requires a commercial
+license until the stated change date, **27 July 2030**, when it converts to Apache-2.0.
