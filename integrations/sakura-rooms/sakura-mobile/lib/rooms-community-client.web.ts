@@ -87,7 +87,7 @@ async function json(path: string, packet?: TransportRequest): Promise<unknown> {
   } finally { clearTimeout(timer); }
 }
 async function serviceId(): Promise<string> {
-  const info = asObject(await json('/api/rooms/v1/info'));
+  const info = asObject(await json('/api/rooms/v1/info/'));
   if (info.version !== 1 || typeof info.serviceId !== 'string' || !HEX.test(info.serviceId)) throw invalid();
   return info.serviceId;
 }
@@ -187,7 +187,7 @@ async function deliver(data: Profile): Promise<Profile> {
   const { packet } = data.pending;
   await verifyRequest(packet, { serviceId: data.serviceId, allowExpired: true, requireCredential: true });
   try {
-    const response = await json('/api/rooms/v1/command', packet);
+    const response = await json('/api/rooms/v1/command/', packet);
     const raw = asObject(response);
     if (raw.version !== 1 || raw.kind !== 'receipt' || raw.serviceId !== data.serviceId || raw.roomId !== packet.command.roomId) throw invalid();
     const event = await verifyEvent(raw.event, data.serviceId);
@@ -195,8 +195,8 @@ async function deliver(data: Profile): Promise<Profile> {
     // Keep acceptance evidence even if a subsequent authenticated read fails.
     data = await save(data, { checkpoints: pins(data, packet.command.roomId, [event]), pending: { ...data.pending!, accepted: event } });
     let history;
-    try { history = await json('/api/rooms/v1/command', await signed(data, { type: 'get_room', roomId: packet.command.roomId })); }
-    catch (error) { if ((error as any).status !== 403) throw error; history = await json('/api/rooms/v1/command', await signed(data, { type: 'get_my_record', roomId: packet.command.roomId })); }
+    try { history = await json('/api/rooms/v1/command/', await signed(data, { type: 'get_room', roomId: packet.command.roomId })); }
+    catch (error) { if ((error as any).status !== 403) throw error; history = await json('/api/rooms/v1/command/', await signed(data, { type: 'get_my_record', roomId: packet.command.roomId })); }
     return await accept(data, history, packet.command.roomId, true);
   } catch (error) {
     // HTTP status alone never proves that an action was rejected.
@@ -221,8 +221,8 @@ export async function refreshCommunity(roomId: string): Promise<CommunityView> {
   if (data.pending) throw new CommunityError('Recover the saved request before refreshing shared history.');
   if (!await usableKey(data)) return view(data, await state(data, roomId));
   let response;
-  try { response = await json('/api/rooms/v1/command', await signed(data, { type: 'get_room', roomId })); }
-  catch (error) { if ((error as any).status !== 403) throw error; response = await json('/api/rooms/v1/command', await signed(data, { type: 'get_my_record', roomId })); }
+  try { response = await json('/api/rooms/v1/command/', await signed(data, { type: 'get_room', roomId })); }
+  catch (error) { if ((error as any).status !== 403) throw error; response = await json('/api/rooms/v1/command/', await signed(data, { type: 'get_my_record', roomId })); }
   data = await accept(data, response, roomId);
   return view(data, await state(data, roomId));
 }

@@ -106,9 +106,11 @@ and pinned with JavaScript SRI plus a SHA-256 check before WASM initialization.
 Each fresh load attempt creates a new pinned engine, including after an outage.
 Keep previously deployed hashed assets available while older app tabs remain open.
 
-This is source integration, not a production deployment. Sakura's required
-private Studio release workflow and ATSU hosting restoration still apply; an
-export of a public branch alone must not replace the production app.
+Installing this package changes source only. The community paper beta was
+released separately on 4 November 2026; see its [hosted release status](../../docs/community-rooms-beta.md#hosted-release-and-next-operational-gates).
+Sakura's required private Studio release workflow and ATSU hosting restoration
+still apply; an export of a public branch alone must not replace the production
+app or omit the community service and proxy handlers.
 
 ## Rebuild and verify
 

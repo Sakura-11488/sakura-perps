@@ -4,6 +4,12 @@ All hexadecimal values are lowercase. Identities, room IDs, request IDs and
 hashes are 32 bytes; Ed25519 signatures are 64 bytes. Numeric transport values
 are safe nonnegative integers. No token is a wallet credential.
 
+Canonical browser endpoints are `GET /api/rooms/v1/info/` and
+`POST /api/rooms/v1/command/`. The trailing slash avoids hosting-layer redirects;
+the client continues to refuse every redirect. The dedicated service also
+accepts the exact legacy no-slash paths. Query strings, extra path segments and
+repeated slashes are not aliases.
+
 `SignedRequest` has exactly `version:1, serviceId, actor, requestId, issuedAt,
 expiresAt, command, signature`, in this canonical signing order (signature is
 excluded from the signing preimage). The optional HTTP `credential` is a

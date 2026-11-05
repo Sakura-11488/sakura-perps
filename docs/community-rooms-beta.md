@@ -1,6 +1,10 @@
 # Invite-only community paper beta
 
-This source adds `/app/perps/community` beside the existing local Rooms pilot.
+The invite-only hosted paper beta was released on **4 November 2026** at
+[/app/perps/community/](https://sakuraonseeker.com/app/perps/community/), beside
+the existing local Rooms pilot. This repository contains its public source;
+merging a source change does not redeploy the website or persistent service.
+
 Two or more people can join one immutable plan, approve their own allocation and
 review their outcomes together. Each participant has a distinct browser-generated
 Ed25519 identity and an independent paper ledger under that shared plan. There is
@@ -99,7 +103,21 @@ process death around commit, restart, backup restoration and client checkpoints.
 The full Expo test at `web/test/rooms-community.browser.mjs` runs the same user
 flow through the exported app at `/app/`, with desktop/mobile layouts and themes.
 
-Before external access, provision persistent hosting, private backups, explicit
-HTTPS origin routing, monitored operation and a verified private reporting
-channel. No vulnerability mailbox, responder coverage, independent audit or
-real-funds readiness is established by this merge.
+## Hosted release and next operational gates
+
+The 4 November release uses a dedicated persistent SQLite service behind the
+website's exact same-origin HTTPS proxy paths. The release process preserved
+private Studio, the required ATSU restoration and earlier hashed browser assets.
+Preview uses separate credentials, identity and storage, and runs on demand.
+
+Production has hourly verified on-host backups and a verified encrypted off-host
+snapshot. Ongoing off-host replication is not configured. Automating encrypted
+backup refresh and rehearsing isolated recovery are part of the
+[first-cohort roadmap](../ROADMAP.md#1-an-observable-supported-first-cohort--current-phase).
+Keep database files, signing keys, admission codes and private operational
+evidence outside public Git.
+
+Deployment does not establish a verified vulnerability mailbox, responder
+coverage, independent audit or real-funds readiness. [SECURITY.md](../SECURITY.md)
+remains the source of truth for reporting. The hosted beta is for invited paper
+sessions; it is not an authorized target for the local security challenge.

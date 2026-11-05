@@ -61,6 +61,12 @@ CORS origins. Keep the private database off the web root. This repository does
 not provision hosting, register a domain, expose a listener publicly, or deploy
 Sakura. Its private Studio and ATSU release requirements still apply separately.
 
+The browser calls `/api/rooms/v1/info/` and `/api/rooms/v1/command/` with explicit
+trailing slashes and refuses redirects. Route those exact paths to the service
+without redirecting a signed POST. The standalone service retains its exact
+no-slash aliases for existing clients; neither form accepts query parameters or
+extra path segments.
+
 ## Durable requests and recovery
 
 The protocol is documented in [CONTRACT.md](CONTRACT.md). All room reads require

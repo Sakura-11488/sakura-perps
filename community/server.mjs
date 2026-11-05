@@ -285,8 +285,10 @@ export async function startServer({ dbPath, origin: configuredOrigin, port = 0, 
       try {
         if (!expectedOrigin || request.headers.host !== new URL(expectedOrigin).host || (request.headers.origin && request.headers.origin !== expectedOrigin)) throw new ServiceError('ORIGIN_REJECTED', 403);
         if (!ipLimit.accept(request.socket.remoteAddress ?? 'unknown', currentTime())) throw new ServiceError('RATE_LIMITED', 429);
-        if (request.method === 'GET' && request.url === '/api/rooms/v1/info') { reply(response, 200, { version: 1, serviceId: store.serviceId }); return; }
-        if (request.method === 'POST' && request.url === '/api/rooms/v1/command') {
+        // Canonical browser URLs include the slash so a hosting-layer 308 cannot
+        // redirect a signed mutation. Retain only the exact old aliases locally.
+        if (request.method === 'GET' && ['/api/rooms/v1/info/', '/api/rooms/v1/info'].includes(request.url)) { reply(response, 200, { version: 1, serviceId: store.serviceId }); return; }
+        if (request.method === 'POST' && ['/api/rooms/v1/command/', '/api/rooms/v1/command'].includes(request.url)) {
           if (request.headers.origin !== expectedOrigin || request.headers.cookie || request.headers.authorization || request.headers['content-encoding'] || !/^application\/json(?:;\s*charset=utf-8)?$/i.test(request.headers['content-type'] ?? '')) throw new ServiceError('INVALID_TRANSPORT', 400);
           const packet = await readBody(request);
           const operation = queue.then(() => execute(packet));
